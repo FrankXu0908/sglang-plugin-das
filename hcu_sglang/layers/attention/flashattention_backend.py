@@ -29,6 +29,7 @@ _INIT_TARGET = (
 def register() -> None:
     hooks = (
         (_INIT_TARGET, around_init),
+        ("sglang.srt.layers.attention.flashattention_backend.FlashAttentionBackend.prepare_paged_mha_query", around_prepare_paged_mha_query),
         ("sglang.srt.layers.attention.flashattention_backend.FlashAttentionBackend.get_paged_mha_kv_cache", around_get_paged_mha_kv_cache),
         (_FORWARD_EXTEND_TARGET, around_forward_extend),
         (_FORWARD_DECODE_TARGET, around_forward_decode),
@@ -77,7 +78,47 @@ def around_init(original_fn, backend, *args, **kwargs):
     backend.flash_attn_with_kvcache = flash_attn_with_kvcache
     backend._get_scheduler_metadata = None
     backend._get_fa_runtime_policy = None
+    from hcu_sglang.utils.detection import get_gcn_arch
+    from hcu_sglang.mem_cache.hcu_mha_pool import _layout_enabled
+    model_runner = args[0] if args else kwargs.get("model_runner")
+    model_config = getattr(model_runner, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None) or ()
+    backend._hcu_bf16_fp8_kv_query = (
+        get_gcn_arch().split(":", 1)[0] == "gfx936"
+        and _layout_enabled()
+        and getattr(backend, "page_size", None) == 64
+        and len(architectures) == 1
+        and architectures[0] in (
+            "Qwen3_5ForConditionalGeneration",
+            "Qwen3_5ForCausalLM",
+            "Qwen3_5ForCausalLMMTP",
+        )
+        and getattr(backend, "fa_impl_ver", None) == 3
+        and getattr(backend, "kv_cache_dtype_str", None) == "fp8_e5m2"
+        and not getattr(backend, "use_mla", False)
+    )
     return result
+
+
+def around_prepare_paged_mha_query(
+    original, backend, q, q_rope, k_rope, layer, *,
+    logical_batch_size, kv_head_num, is_prefill,
+):
+    import torch
+
+    if (not is_hcu() or not getattr(backend, "_hcu_bf16_fp8_kv_query", False)
+            or q.dtype != torch.bfloat16 or layer.head_dim > 256
+            or q_rope is not None or k_rope is not None):
+        return original(backend, q, q_rope, k_rope, layer,
+            logical_batch_size=logical_batch_size, kv_head_num=kv_head_num,
+            is_prefill=is_prefill)
+    if layer.k_scale is not None or layer.v_scale is not None:
+        raise RuntimeError(
+            "HCU BF16 query with FP8 E5M2 KV requires unscaled KV cache; "
+            "the DTK paged attention kernel ignores K/V descales"
+        )
+    return q, q_rope, k_rope, None, None
 
 
 def _should_skip_kv_store(args, kwargs) -> bool:

@@ -121,11 +121,6 @@ def flash_attn_with_kvcache(
     )
 
     k_cache, v_cache = _restore_hcu_cache_layout(k_cache, v_cache)
-    q_4d = q
-    if q.ndim == 3:
-        query_len = max_seqlen_q or 1
-        q_4d = q.contiguous().view(-1, query_len, q.shape[-2], q.shape[-1])
-
     if _layout_enabled() and max_seqlen_q is not None and max_seqlen_q > 1:
         page_capacity = (
             page_table.shape[1] * k_cache.shape[2]
@@ -152,6 +147,11 @@ def flash_attn_with_kvcache(
             layout="bhsd",
         )
         return _apply_out(result, out, return_softmax_lse)
+
+    q_4d = q
+    if q.ndim == 3:
+        query_len = max_seqlen_q or 1
+        q_4d = q.contiguous().view(-1, query_len, q.shape[-2], q.shape[-1])
 
     if _layout_enabled():
         _note_fa("fa_decode_bhsd")

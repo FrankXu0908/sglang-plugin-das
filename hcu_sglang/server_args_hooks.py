@@ -35,18 +35,30 @@ def _model_arch(server_args: Any) -> str | None:
     return architectures[0] if architectures else None
 
 
+def _uses_bfloat16(view):
+    if view.dtype in ("bfloat16", "bf16"):
+        return True
+    if view.dtype != "auto":
+        return False
+    from sglang.srt.arg_groups.model_override_base import model_config_of
+    config = (view.get_model_config() if hasattr(view, "get_model_config")
+              else model_config_of(view))
+    return str(getattr(config, "dtype", None)) in ("torch.bfloat16", "bfloat16", "bf16")
+
+
 def around_qwen4_fa3_fp8_fallback(original, view):
     from hcu_sglang.utils.detection import get_gcn_arch
     from sglang.srt.environ import envs
 
     if (is_hcu() and view.attention_backend == "fa3"
             and view.kv_cache_dtype == "fp8_e5m2"
-            and view.dtype in ("bfloat16", "bf16") and view.page_size == 64
+            and _uses_bfloat16(view) and view.page_size == 64
             and get_gcn_arch().split(":", 1)[0] == "gfx936"
             and envs.SGLANG_KV_LAYOUT_HCU_FA.get()
             and _model_arch(view) in (
-                "Qwen4ExpForConditionalGeneration", "Qwen4ExpForCausalLMMTP")):
-        logger.info("Qwen4 HCU FA keeps fp8_e5m2 KV with BF16 attention")
+                "Qwen4ExpForConditionalGeneration", "Qwen4ExpForCausalLMMTP",
+                "Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM")):
+        logger.info("HCU FA keeps fp8_e5m2 KV with BF16 attention")
         return {}
     return original(view)
 

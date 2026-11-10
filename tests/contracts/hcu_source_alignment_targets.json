@@ -313,6 +313,7 @@
     "sglang.srt.layers.attention.flashattention_backend.FlashAttentionBackend.forward_decode",
     "sglang.srt.layers.attention.flashattention_backend.FlashAttentionBackend.forward_extend",
     "sglang.srt.layers.attention.flashattention_backend.FlashAttentionBackend.get_paged_mha_kv_cache",
+    "sglang.srt.layers.attention.flashattention_backend.FlashAttentionBackend.prepare_paged_mha_query",
     "sglang.srt.layers.attention.graph_variants.AttentionGraphVariants",
     "sglang.srt.layers.attention.graph_variants.DsaGraphVariants",
     "sglang.srt.layers.attention.graph_variants.Dsv41CandidateGraphVariants",

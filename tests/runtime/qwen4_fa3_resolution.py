@@ -23,6 +23,11 @@ TARGET = "sglang.srt.arg_groups.overrides._attention_backend_fa3_fp8_fallback"
     (True, "gfx936", "Qwen4ExpForConditionalGeneration", 64, "bfloat16", False, "fa3", "fp8_e5m2", "triton"),
     (True, "gfx936", "Qwen4ExpForConditionalGeneration", 64, "bfloat16", True, "triton", "fp8_e5m2", "triton"),
     (True, "gfx936", "Qwen4ExpForConditionalGeneration", 64, "bfloat16", True, "fa3", "fp8_e4m3", "fa3"),
+    (True, "gfx936", "Qwen3_5ForConditionalGeneration", 64, "bfloat16", True, "fa3", "fp8_e5m2", "fa3"),
+    (True, "gfx936", "Qwen3_5ForConditionalGeneration", 64, "auto", True, "fa3", "fp8_e5m2", "fa3"),
+    (True, "gfx936", "Qwen3_5ForCausalLM", 64, "auto", True, "fa3", "fp8_e5m2", "fa3"),
+    (True, "gfx936", "Qwen3_5ForConditionalGeneration", 64, "float16", True, "fa3", "fp8_e5m2", "triton"),
+    (True, "gfx938", "Qwen3_5ForConditionalGeneration", 64, "auto", True, "fa3", "fp8_e5m2", "triton"),
 ])
 def test_registered_pass_updates_preimported_consumer_without_mutating_inputs(
         monkeypatch, hcu, arch, model, page, dtype, layout, backend, kv, expected):
@@ -40,7 +45,7 @@ def test_registered_pass_updates_preimported_consumer_without_mutating_inputs(
     assert attention_hook._attention_backend_fa3_fp8_fallback is original
     record = SimpleNamespace(attention_backend=backend, kv_cache_dtype=kv,
         page_size=page, dtype=dtype, _resolved_overrides=[],
-        _model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[model])))
+        _model_config=SimpleNamespace(dtype="bfloat16", hf_config=SimpleNamespace(architectures=[model])))
     try:
         for target, hook, kind in registered:
             if target == TARGET:

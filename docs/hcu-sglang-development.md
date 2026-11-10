@@ -1931,6 +1931,27 @@ main 整理已同步正在评测的三个 KV 修复，并移除未部署的 raw 
 
 参考环境为 bw46 `zhuwenbo_sgl_1024` SGLang 0.5.18，TP4 NEXTN 3/1/4 eager；对 LightOp 做了 top-k/top-p 频数测试。0522 使用 `--kv-cache-dtype fp8_e5m2` 时，在随机采样前的 full-attention KV stride 解析处出现 `ValueError: unexpected KV buffer ndim=4`，故服务验证使用默认 KV dtype，不能与参考配置作严格性能 A/B。测试日志和 trace 位于 bw46 的 `/sgl/deploy-bw46-qwen38-20261109/mtp-random-adapt-20261109/` 及 `/sgl/deploy-bw46-qwen38-20261109/decodegraph-vision-20261109-01/`。
 
+
+## 2026-11-09 Qwen3.8 FP8 E5M2 KV 的 HCU FA 路径
+
+用户的 Qwen3.8-27B（`Qwen3_5ForConditionalGeneration`）使用 `fa3`、page 64 和 `fp8_e5m2` 时，官方配置 pass 原先将 backend 改为 Triton，而 PR #22 引入的 HCU pool 仍存储四维 BHSD；真实图片请求因此在 Triton 的三维 KV stride 解析处失败。本次在 plugin 的既有配置 Hook 中补充 Qwen3.5 主模型架构，并在 `dtype=auto` 时读取解析后的模型 dtype。保留物理 HCU、gfx936、BF16、page 64、HCU FA layout、fa3 与 E5M2 的组合限制，其他配置继续调用当前有效 original。
+
+HCU 原生 FA 对该组合使用 BF16 query 与 FP8 KV。新增 `prepare_paged_mha_query` AROUND Hook，避免官方 FA3 分支将 query 额外量化为 FP8；不改 pool 存储、官方源码或 adapter。DTK 26.10 原生 paged attention 的 GPU 对拍证明，decode 与 verify 都忽略传入的非单位 K/V descale。因此本次只支持没有显式 K/V scale 的 KV 路径；发现 scale 时明确报错，不静默丢弃标定值。带标定 scale 的模型不在本次支持范围内。
+
+固定官方 `baa9befa381511cd4d56f83980951e5a45fffc6d`、adapter `0d5d73bfdaafb20d84235a4096d4b64b73bb1238`，plugin 以 release 的 `23ed5ce0047b281ff0659ca26a30a28c658964df` 为基线。公开配置 pass 的修复前反例为 3 个失败、2 个负例通过；修正后的配置与公开 query Hook 回归共 26 项通过，覆盖有效 original 回退与显式 scale 拒绝。真实 HCU pool 的 BF16 query、FP8 KV、GQA=6、head_dim=256、page=64，query 长度 1/4 的无 scale eager 与每组 3 次更新输入 Graph 重放均通过 FP32 参考对拍，最大绝对误差 0.00390625。非单位 scale 的失败样本保留为 vendor 支持边界证据，不能记为通过。
+
+Qwen3.8-27B TP4 NEXTN 3/1/4 使用 FP8 KV 完成真实图片请求：输入 5568 token（含 1476 image token）、输出 128 token，冷请求实际执行 ViT；重复请求复用 image embedding，但 KV cached_tokens 仍为 0。捕获图片/prefill 与 20 个 decode 轮次的逐 rank trace，测试服务随后关闭。完整模型精度、非 gfx936、其他 page/head 组合与显式 KV scale 未验收。性能比较必须统一 TP、输入、缓存、MTP 接受长度及 profiler 状态；本次功能 PR 不声明 TPOT 因果或跨版本精度等价。前述 mRoPE 缓存修复保留在独立 PR #36，本 PR 不包含它。
+
+本次项目 L0（593 个 Python 文件）、导览重建及快照检查、git diff --check 均通过。服务器没有可用浏览器，导览页面的实际渲染和窄屏截图未验收；未以静态检查代替该项。
+
+
+## 2026-11-09 FP8 KV 并发变长 prefill 修正
+
+PR #37 的 HumanEval/MATH500 TP2、并发 8 预检触发实际服务退出：BHSD varlen 路径之前先将扁平 query 按 max_seqlen_q reshape 为四维，混合长度批次的 total_q 并非 batch_size × max_seqlen_q，因此 shape 无效。原始失败源码、完整服务日志与请求现场单独保留，该轮不计入模型精度成绩。
+
+本次仅将矩形 query 视图的构造移到 BHSD varlen 分支返回之后；varlen 原生接口继续直接接收扁平 query 和 cu_seqlens_q。单步 decode、固定长度 verify 及关闭 HCU layout 后的既有调用契约保持原路径，不改 adapter/官方源码。
+
+公共接口的 BF16/FP8 变长 prefill 用例在修复前均失败；修复后配置、query 与接口回归共 30 项通过。query_lengths=[3,7]、KV lengths=[67,75]、GQA=6、D=256、page=64 的 BF16/FP8 原生 GPU 输出均匹配 FP32 参考，最大绝对误差 0.00390625。L0、Ruff CI 规则、guide snapshot 与 diff 检查见本次验证记录。当前 prefill Graph 关闭，变长 prefill Graph 未验证；后续 TP2 并发全量精度使用固定新快照重新运行，原先失败尝试不与新结果混用。
 ## 2026-11-09 mRoPE delta 设备缓存迁入插件
 
 固定组合：official `baa9befa381511cd4d56f83980951e5a45fffc6d`、adapter `3ad198a3eefcf858ffa425ed1ff5f03543ab4391`、plugin `40dee477cc3e63e038f420e2365916a4921624a1` 加工作区修改。开始前已有随机采样相关的未提交修改，本次保留；不将这些内容计为本次实现。
@@ -1970,3 +1991,45 @@ main 整理已同步正在评测的三个 KV 修复，并移除未部署的 raw 
 回补范围：与 main #33 同形。`hcu_sglang/distributed_backend.py` 删除 `around_sync_eagle_verify_outputs` 与注册项（-15 行，六个 parallel-state 常驻钩子不动）；`tests/contracts/hcu_source_alignment_targets.json` 删除该条目；新增 `tests/test_eagle_sync_hook_removed.py` 钉死源树零提及、契约零条目、常驻钩子在册。回补判据为治理 §6 ②类（锚点在本 release 树存在）。先后 rebase：到 23ed5ce（#35 NEXTN 随机采样）契约 JSON 冲突，解为保留 #35 新增 `_can_use_sparse_uno_tree_target_sampling` 与 `sample_uno_tree_target_tokens` 两条并维持本条删除；到 7983c61（#36 mRoPE delta 设备缓存）devlog 尾部双追加冲突，解为 #36 条目在前、本条在后两存。
 
 实际验证：离线 pytest 钉死测 3 passed（pristine 1b7609e 基线上源提及与契约条目两断言红）；`python -I -m py_compile` 通过；`python -I ci/l0_gate.py` passed 0 errors；提交 blob 无 CR。未验证项：未在 HCU 上重跑 MTP+attn-DP 组合（退役不改变官方树运行时行为，钩子本就未挂上）；S1 启动 10 次报错消失未实测复现；GPU/整模型精度不在本次范围。main 线同形 #33 与本 PR 树间独立，任一先合不影响另一。
+
+
+## 2026-11-10 PR #37 query 运行时门控收窄
+
+基线为 PR 分支 `b79fceedd6dd4a1039b1a1b6db25ba9b0276c23f`、official v0.5.22
+`baa9befa381511cd4d56f83980951e5a45fffc6d` 与 adapter
+`0d5d73bfdaafb20d84235a4096d4b64b73bb1238`。在独立 checkout 修复，未修改已安装的
+plugin、adapter、official 源码，也未启动或停止模型服务。
+
+`FlashAttentionBackend.__init__` 的 `_hcu_bf16_fp8_kv_query` 新增两项必要条件：后端实际
+`page_size == 64`，且模型只有一个明确的 Qwen3.5 dense 架构名。白名单是
+`Qwen3_5ForConditionalGeneration`、`Qwen3_5ForCausalLM` 与
+`Qwen3_5ForCausalLMMTP`；后者保留 NEXTN draft runner。继续保留 gfx936、HCU layout、
+FA3、E5M2 KV、非 MLA 的原门控，以及调用时 BF16 query、head dim 和 RoPE 的限制。
+未知架构、Qwen4、Qwen3.5 MoE 和非 64 page 均回到传入的有效 `original_fn`。
+
+新增回归通过官方真实构造函数及 HookRegistry 同时应用 init/query hook，覆盖 model_runner
+的位置与关键字传参。Qwen4 主模型与 MTP、非 64 page、未知/缺失架构的 prefill/decode
+均与上述固定 official 的真实 `prepare_paged_mha_query` 方法对照，检查 E5M2 query、
+展开后的 K/V descale 数值、形状、storage，以及有效包装链被调用。scale 覆盖缺省、显式
+单位 scale 和非单位 scale。Qwen3.5 page 64 保留 BF16，无 scale 时不调用 fallback；
+有 scale 时保留原来的明确拒绝，未声称 DTK kernel 支持 descale。
+
+实际验证：修复前同一批回归为 48 failed、32 passed，失败全部来自范围外 query 分发；
+修复后 query 与配置分发回归共 96 passed。使用真实 CPU torch tensor 和固定官方方法，
+GPU 对测试进程不可见；仅将导入所需的硬件探测及构造所需的分布式/runtime context 替为
+测试配置，没有替换 query 分发方法。结果属于 Python 分发回归，不是 GPU 数值或性能验证。
+
+证据保存于 `${EVIDENCE_ROOT}`（本次目录名 `pr37-query-gate-20261110-01`），包括
+`baseline.json`、CPU 测试入口及 red/green 日志。GPU、Graph、模型精度与端到端性能未重跑；
+当前节点没有空闲卡。导览仅同步代码和开发记录，未修改页面布局；实际浏览器渲染、交互与
+窄屏截图未重新验收。
+
+
+补充检查：L0（598 个 Python 文件）、导览重建/快照、migration plan 快照和
+`git diff --check` 均通过；mRoPE、生成源码约束、导览与 EAGLE hook 退役检查合计
+21 passed（另有 11 个 subtests passed）。全量 unittest 在此隔离执行方式下为
+127 tests、2 failures、1 import error、13 skipped，没有记为全量通过。两个失败分别是
+既有 CLI 假模块缺少 `field_names`，以及子进程自动执行 adapter bootstrap 后已导入 torch；
+将本次运行时改动暂时还原到基线重跑 `test_hcu_runtime.py`，同样为 6 tests、2 failures，
+随后完整恢复修复。mRoPE 的 import error 来自禁用 GPU 后官方模块导入期硬件探测；
+使用上述 CPU 探测夹具后其 10 项测试均通过。未修改这些无关实现与测试来消除告警。
