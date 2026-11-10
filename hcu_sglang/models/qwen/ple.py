@@ -26,6 +26,7 @@ _PLE_OOM_EXCEPTIONS = (RuntimeError, getattr(torch, "AcceleratorError", RuntimeE
 
 import functools
 from hcu_sglang.layers.dp_attention import _aiter_reduce_scatter_tensor
+from hcu_sglang.models.qwen.ple_probe import probe_ngram_quant_flags
 
 @functools.lru_cache(maxsize=1)
 def _etp_rs_min_tokens() -> int:
@@ -843,55 +844,16 @@ class NGramMethods:
         )
         # etp_reduce_scatter is set below, once ngram_embedding exists (its
         # tp_size feeds the gate); see _ple_etp_reduce_scatter_enabled.
-        ple_int8 = False
-        ple_fp8_channelwise = False
-        ple_not_ignored = False
-        # Constructor prefix is the PLE module ("...ple.ple_embedding").
-        # Quant ignore/target regexes are written against the ngram table.
-        ngram_name = prefix if prefix.endswith("ngram_embedding") else (
-            f"{prefix}.ngram_embedding" if prefix else "ngram_embedding")
-        if quant_config is not None and quant_config.get_name() == "compressed_tensors":
-            ignore = getattr(quant_config, "ignore", ())
-            # Match the shard naming used in -ngram checkpoints. Using
-            # ".weight" is wrong for FP8-ngram ignore regexes that only carve
-            # out "...ngram_embedding.shard_N" without a trailing ".weight".
-            ple_not_ignored = not should_ignore_layer(
-                f"{ngram_name}.shard_0", ignore
-            )
-            if ple_not_ignored:
-                targets = getattr(quant_config, "target_scheme_map", {})
-                for target, scheme in targets.items():
-                    if not check_equal_or_regex_match(ngram_name, (target,)):
-                        continue
-                    weight_args = scheme.get("weights") if scheme else None
-                    weight_type = getattr(weight_args, "type", None)
-                    weight_type = getattr(weight_type, "value", weight_type)
-                    ple_int8 = (
-                        getattr(weight_args, "num_bits", None) == 8
-                        and weight_type == "int"
-                    )
-                    break
-                # FP8-ngram checkpoints leave ngram_embedding shards un-ignored
-                # but only list Linear in config_groups.targets.
-                if not ple_int8:
-                    ple_fp8_channelwise = True
-        if (
-            not ple_int8
-            and quant_config is not None
-            and quant_config.get_name()
-            in ("slimquant_w4a8_marlin", "slimquant_w4a8")
-        ):
-            comp = getattr(config, "compression_config", None) or {}
-            mixed = comp.get("mixed_precision") if isinstance(comp, dict) else {}
-            ngram = (mixed or {}).get("ngram_embedding") or {}
-            weight_bits = ngram.get("weight_bits")
-            if weight_bits == 8 or weight_bits == "8":
-                ignore = getattr(quant_config, "ignore", ()) or ()
-                ple_not_ignored = not should_ignore_layer(
-                    f"{ngram_name}.shard_0", ignore
-                )
-                if ple_not_ignored:
-                    ple_int8 = True
+        # Probe the quantization layout of the ngram table; naming rules and
+        # branch semantics live in ple_probe (kept sglang-free for offline
+        # tests, matchers injected from the real imports above).
+        ple_not_ignored, ple_int8, ple_fp8_channelwise = probe_ngram_quant_flags(
+            prefix,
+            quant_config,
+            config,
+            should_ignore_layer=should_ignore_layer,
+            check_equal_or_regex_match=check_equal_or_regex_match,
+        )
         self.ple_per_row_scale = ple_int8 or ple_fp8_channelwise
         # Allocate the large PLE table on CPU from the start when offload is
         # requested. This avoids a transient GPU allocation without requiring
