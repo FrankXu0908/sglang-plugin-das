@@ -1962,3 +1962,11 @@ main 整理已同步正在评测的三个 KV 修复，并移除未部署的 raw 
 原测试对当场生成的 pickle payload 做 round-trip，触发 HYGON pickle 反序列化扫描告警。当前使用受约束的 Pickler 写入真实 MultimodalInputs，再通过 pickletools 静态检查字段；reducer_override 拒绝缓存 tensor 进入序列化，并直接序列化该 tensor 验证拒绝分支确实生效。覆盖默认和最高协议，保留缓存隔离断言，消除反序列化调用。
 
 同时按现有仓库模板为本次两个新增 Python 文件补齐 HYGON/Apache-2.0 文件头，对应新增源码归属复核告警。运行时逻辑保持原样；14 项针对性回归通过，文件头补齐前后可执行 AST 一致；L0、导览生成/快照检查及 diff 检查通过。
+
+## 2026-11-09 EAGLE verify-sync 钩子退役回补 v0.5.22
+
+退役基线：`_sync_eagle_verify_outputs` 为 sglang-das fork 树独有符号（0.5.22 基线 15c7204，eagle_utils.py:96，整 TP 组广播，b60d3a2 由 AROUND 收敛到 attn TP/CP 组）；official v0.5.22@baa9befa381511cd4d56f83980951e5a45fffc6d（即 v0.5.22 tag）及上游 main 全史无此符号（`git log -S` 全 refs 零命中），verify 同步内联于 `eagle_sample`（:893/:929/:1058），dp-attention 时上游自愈选 `attn_tp_group`。plugin 与 adapter 不需支持 sglang-das fork 树，钩子在全部受支持宿主上无消费者；无条件注册仅在官方树上产生每进程一条 `Failed to apply hooks`（2026-11-09 S1 gfx938 启动 10 次，main 基线即有，早于 #30）。
+
+回补范围：与 main #33 同形。`hcu_sglang/distributed_backend.py` 删除 `around_sync_eagle_verify_outputs` 与注册项（-15 行，六个 parallel-state 常驻钩子不动）；`tests/contracts/hcu_source_alignment_targets.json` 删除该条目；新增 `tests/test_eagle_sync_hook_removed.py` 钉死源树零提及、契约零条目、常驻钩子在册。回补判据为治理 §6 ②类（锚点在本 release 树存在）。先后 rebase：到 23ed5ce（#35 NEXTN 随机采样）契约 JSON 冲突，解为保留 #35 新增 `_can_use_sparse_uno_tree_target_sampling` 与 `sample_uno_tree_target_tokens` 两条并维持本条删除；到 7983c61（#36 mRoPE delta 设备缓存）devlog 尾部双追加冲突，解为 #36 条目在前、本条在后两存。
+
+实际验证：离线 pytest 钉死测 3 passed（pristine 1b7609e 基线上源提及与契约条目两断言红）；`python -I -m py_compile` 通过；`python -I ci/l0_gate.py` passed 0 errors；提交 blob 无 CR。未验证项：未在 HCU 上重跑 MTP+attn-DP 组合（退役不改变官方树运行时行为，钩子本就未挂上）；S1 启动 10 次报错消失未实测复现；GPU/整模型精度不在本次范围。main 线同形 #33 与本 PR 树间独立，任一先合不影响另一。

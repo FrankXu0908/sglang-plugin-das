@@ -639,7 +639,6 @@
     "sglang.srt.speculative.dspark_components.dspark_draft_sampler.DsparkDraftSampler.stage_sampling_params",
     "sglang.srt.speculative.dspark_components.dspark_planner.DSparkVerifyPlanner.__init__",
     "sglang.srt.speculative.dspark_components.dspark_worker_v2.DSparkWorkerV2.init_cuda_graphs",
-    "sglang.srt.speculative.eagle_utils._sync_eagle_verify_outputs",
     "sglang.srt.speculative.eagle_utils._can_use_sparse_uno_tree_target_sampling",
     "sglang.srt.speculative.eagle_worker_common.prepare_for_draft",
     "sglang.srt.speculative.eagle_worker_v2.EagleDraftWorker.alloc_memory_pool",
