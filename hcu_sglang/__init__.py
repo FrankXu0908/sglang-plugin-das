@@ -7,6 +7,10 @@ logger = logging.getLogger(__name__)
 
 def register() -> None:
     """Entry point for sglang.srt.plugins (called by load_plugins)."""
+    from hcu_sglang import hook_guard
+
+    hook_guard.install()
+
     from hcu_sglang.compat.aiter import install_aiter_compat
 
     install_aiter_compat()

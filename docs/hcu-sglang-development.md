@@ -2033,3 +2033,85 @@ GPU 对测试进程不可见；仅将导入所需的硬件探测及构造所需�
 将本次运行时改动暂时还原到基线重跑 `test_hcu_runtime.py`，同样为 6 tests、2 failures，
 随后完整恢复修复。mRoPE 的 import error 来自禁用 GPU 后官方模块导入期硬件探测；
 使用上述 CPU 探测夹具后其 10 项测试均通过。未修改这些无关实现与测试来消除告警。
+
+## 2026-11-10 hook 目标守卫：启动 traceback 归零
+
+问题来源：2026-11-09 Qwen3.8-Flash-Next W4A8 PD 压测的 `psg.out` / `dsg.out` 各含 226 条 traceback，其中 210 条是 `Failed to apply hooks to <target>`，覆盖 15 个目标 × 7 进程 × 2 次启动；另有 16 条 adapter 侧 `No module named 'cuda'`。服务运行期零 traceback，压测 1269 条请求全 200。分析见 `811/sglang-pd-log-analysis-20261110/`。
+
+基线：plugin `c6ec4f5`、adapter `0d5d73b`（`release/sglang_v0.5.22` 最新），official v0.5.22 仍为 `baa9befa381511cd4d56f83980951e5a45fffc6d`。
+
+15 个失败目标里 14 个是 multimodal/video-generation 面（Wan2.2 / LTX2 / MiniMax-H3 的 config 与 runtime），文本模型永不加载；核对官方树后确认这些符号**存在**，日志里的 `AttributeError: module 'sglang.multimodal_gen.configs' has no attribute 'pipeline_configs'` 源于子包懒加载链在 `diffusers` 处中断（官方 `pyproject.toml` 把它放在 `[project.optional-dependencies].diffusion` 可选组）。第 15 个 `_sync_eagle_verify_outputs` 已由 74f7f33 退役。
+
+plugin 侧改动：新增 `hcu_sglang/hook_guard.py`，在 `register()` 最前面调用 `install()`，包装 `HookRegistry._apply_target` 与 `apply_hooks`。选中 `_apply_target` 而非 `register`，因为"先解析再过滤"会误判——部分目标模块要等所有插件注册完才可导入；现方案先走原路径、只接管**失败**的那次，能解析的目标行为逐字不变，且 `HookRegistry._hooks` 保持插件声明原样，目标合同工具不受影响。失败目标按异常类型分组，在 `apply_hooks` 结束后打一条 INFO 汇总。`HCU_HOOK_GUARD=0` 退回原行为。
+
+`Multiple AROUND hooks`（112 条）**不处理**：`w8a8_lightop` 与 `w8a8_aiter` 两个 AROUND wrapper 在调用期按 runner backend 互斥自门控，注册期删任一个会永久关闭对应量化路径，而不是跳过判断。要消除该提示须把每对合并为单个分发 wrapper，属量化语义改动，需设备验证，另立任务。
+
+adapter 侧改动：`gdn_cutedsl_fallback.install()` 增加 `_cutedsl_unavailable()` 预探针，`ImportError` 且 `exc.name` 为 `cuda`/`cuda.*` 时记 INFO 并返回，不再让 `bridges/sglang.py` 的 `except` 打整栈。其它 ImportError 仍向上抛，真故障依旧可见。
+
+实际验证（本机 Python 3.10，无 torch、无 HCU）：
+
+- `tests/test_hook_guard.py` 6 项通过（假 registry）：缺目标跳过并汇总、多个缺目标共一行、幂等、`HCU_HOOK_GUARD=0` 生效、重复 AROUND 完整保留、`apply_hooks` 体内真异常不被吞。
+- `tests/runtime/hook_guard_real_registry.py`：加载官方 `hook_registry.py` 原件，0 条 ERROR、1 条汇总、对照目标仍 patched、两个 AROUND wrapper 均执行。
+- `tests/runtime/hook_guard_replay.py`：回放日志中全部 15 个真实失败目标，未加固 15 条 ERROR + 15 条 `Failed to apply hooks`，加固后 0 + 0，1 条 INFO 汇总列出全部目标，对照目标仍 patched。
+- adapter 探针用 stub torch 验证：`cuda` 缺失 → INFO 并返回 None；`onnxruntime` 缺失 → 照常抛出。
+- 既有 `tests/test_eagle_sync_hook_removed.py` 3 项仍通过；`py_compile` 通过。
+
+未验证项：未在 HCU 上重启 P/D 做端到端复验（缺少 `/home/Qwen3.8-Flash-Next` 环境与设备）；226 → 12 的实际条数变化来自静态回放，不是真机日志；`Multiple AROUND hooks` 仍存在；multimodal 根因（可选依赖缺失）未改变，只是不再刷屏。
+
+## 2026-11-10 真机验证：hook 守卫与已知重复对静音
+
+验证环境：节点 bw46，容器 `yht-plugin-qwen38-dtk2610-bw46-1103`，8×BW1000 64GB，镜像 DTK 26.10。单实例 TP4/DP4/EP4、EAGLE 3/1/4，4 卡，端口 8291。脚本 `811/verify16/run_hook_check.sh`（新增，直接 exec + `python3 -u`，日志由外层重定向）。基线 `0f329e9`，改动 `2c52c9e`。
+
+启动期实测（同一份参数、同一批卡）：
+
+| 指标 | 基线 `0f329e9` | 改动 `2c52c9e` |
+|---|---|---|
+| `Traceback (most recent call last)` | 105 | **1**（外部占卡导致的 OOM，非 hook） |
+| `Failed to apply hooks to` | 105 | **0** |
+| `Multiple AROUND hooks` | 56 | **0** |
+| `hcu hook guard: skipped` | — | 7（7 个进程各一条，各列出同一组 14 个目标） |
+| `CuTeDSL fallback skipped` | — | 8 |
+
+基线在 2262 行、`Application startup complete` 出现后取的数；改动版在 625 行、因外部占卡 OOM 退出前取的数，两者进程数一致（7），可比。基线的 105 = 15 目标 × 7 进程，改动的 0 与之对应。
+
+真机验证纠正了两处只有实跑才会暴露的问题：
+
+1. **汇总日志在 INFO 级别会丢**。第一版用 `logger.info`，实测 `Failed to apply hooks` 已归零但汇总行完全不可见；插件自身的 `optimization hooks registered` 同样缺失，而 SGLang 自己的 WARNING 可见。原因是 `register()` 跑在 SGLang 配置 logging 之前，root logger 的 last-resort handler 丢弃 INFO。汇总改用 WARNING 后稳定可见（提交 882e09a）。adapter 的 CuTeDSL 跳过提示同理改为 WARNING（adapter 提交 a39bdf6）。
+2. **`Multiple AROUND hooks` 不能靠合并或删注册消除**。审计 8 个目标后确认：`w8a8_lightop` 与 `w8a8_aiter` 的两个 wrapper 都按各自 runner backend 门控，`unquant` 的 marlin 侧额外要求 `layer._marlin_w16a16_moe_packed`，`eplb` 的 placement 与 integration 各自先调 `original(server_args)` 再校验 —— **所有 wrapper 在门控未命中时都 `return original(...)` 透传**，链式调用不会丢失。因此重复注册本身安全，但注册期无法择一：`get_moe_runner_backend()` 在注册时仍是 AUTO，要等 `ServerArgs` 解析后才确定。
+
+   处理方式取中间路线：不合并语义、不删注册，只在 logger 上过滤该目标的这条提示，白名单 `SAFE_AROUND_PAIRS` 显式列出 8 个目标及各自的安全理由；不在名单内的新重复仍会告警。`HCU_HOOK_KNOWN_PAIRS=0` 恢复提示（提交 2c52c9e）。
+
+离线与真实 registry 验证：`tests/test_hook_guard.py` 8 项通过；`tests/runtime/hook_guard_known_pairs.py`（新增）用官方 `hook_registry.py` 验证已知对被静音、未知目标仍告警、同 logger 其他警告不受影响；`tests/runtime/hook_guard_replay.py` 回放 15 个真实失败目标，加固前 15 条 ERROR、加固后 0 条 + 1 条汇总。
+
+未完成项：因其他任务在验证中途占满 8 张卡（各约 59GB，本容器不持有 kfd），改动版未跑到 `Application startup complete`，**未做推理请求验证**。基线那次是完整到 ready 并用 `1+1=` 得到 `3` 的。改动只影响插件注册期的日志分流，不参与前向计算，但仍应在空闲卡上补一次到 ready 的冒烟。
+
+环境侧教训（记录以免重复踩坑）：`verify16/env.sh` 无条件重设 `PYTHONPATH`，在 source 之后覆盖才有效，否则测的仍是软链接指向的旧工作树；`docker exec -d` + `nohup` + `exec` + `tee` 组合下日志会落到外层驱动文件，改用直接 `exec` 并由外层 `>` 重定向、`python3 -u` 无缓冲后可稳定落盘。
+
+## 2026-11-10 bw47 单实例 DP2/EP2 验证：与 PD 分离无关
+
+问题：2026-11-09 那批 hook 噪音是否只在 PD 分离下出现。结论：**与部署形态无关**。`load_plugins()` 在每个进程启动时都调用一次 `apply_hooks()` 并遍历全部注册目标，PD 分离只是把进程数翻倍，所以条数看起来更多；单实例同样会全量触发。CuTeDSL 提示同理，属 adapter bootstrap 的依赖探测。
+
+验证环境：节点 bw47，容器 `yht-plugin-qwen38-dtk2610-bw47-1104`，单实例 TP2/DP2/EP2（原计划 TP4，因卡 0/3/4/5/6 被其他租户占用，改用空闲的卡 1、2），端口 8291，脚本 `811/verify16/run_bw47_ifb.sh`（新增）。改动 `2c52c9e` + adapter `a39bdf6`。
+
+结果（664 行，`Application startup complete` 出现，`/health` 200，`1+1=` 返回正确算术序列）：
+
+| 指标 | 值 |
+|---|---|
+| `Traceback (most recent call last)` | **0** |
+| `Failed to apply hooks to` | **0** |
+| `Multiple AROUND hooks` | **0** |
+| `hcu hook guard: skipped` | 5（各进程各一条，各列同一组 14 个目标） |
+| `CuTeDSL fallback skipped` | 6（一条 WARNING，非堆栈） |
+| `Application startup complete` | 1 |
+
+这条链路同时补上了 bw46 那次缺的「到 ready + 推理」验证。
+
+bw47 环境本身跑不动这套组合，需要先补五项前置条件（均为容器差异，与代码无关）：
+
+1. `pip install ipython`：`sglang/utils.py` 顶层 `from IPython.display import`，缺失会让 adapter 的 `platform_seam`、`dist_bc` 等 seam 连锁失败。
+2. `pip install gguf`：缺失时 adapter 的 slimquant 桥接装不上。
+3. `pip install scipy`：`hcu_sglang.layers.attention.current_dsa.rotation` 顶层 `from scipy.linalg import hadamard`，缺失会让插件 `register()` 在 `current_dsa` 处中断，**后续所有注册（含 `slimquant_w4a8_marlin` 量化方法）全部丢失**，表现为 `--quantization slimquant_w4a8_marlin` 报 invalid choice —— 这个症状极具误导性，容易被当成 ABI 问题。
+4. `pip install soundfile`：`sglang.srt.entrypoints.openai.audio_chunking` 顶层导入。
+5. `pip install -e . --no-deps --no-build-isolation`：bw47 没有 editable 安装，`sglang.srt.plugins` entry_point 为空（`[]`），插件完全不会被加载。安装前需 `git config --global --add safe.directory` 两仓路径，否则 setuptools 读版本号时因 dubious ownership 失败。
+
+`hook_guard` 在 bw47 上还额外验证了一个设计点：`apply_hooks` 用 `try/finally` 发汇总，即使 `register()` 中途抛异常（如上述缺 scipy），汇总仍会照常打印——日志里能看到汇总行出现在 `register()` 失败之后。
