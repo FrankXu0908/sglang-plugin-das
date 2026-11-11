@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+
+name: Nightly Wheel
+
+# main 线构建 hcu-sglang-plugin 纯 python wheel，
+# 版本在构建期打成 +hcu.<时间>.g<commit6>，产物即最终包（不走 CIUpload REPAIR / 上传后改写）。
+# push main 直接上传 nightly 归档；workflow_dispatch 只构建并保留 artifact。
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要构建的 Git ref/branch/tag/SHA，默认当前分支 HEAD'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  # CIUpload --record 上传前需查询关联 PR (只读)
+  pull-requests: read
+  # CIUpload --record 上报需读取 check-run 统计 (只读)
+  checks: read
+
+concurrency:
+  group: nightly-wheel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-wheel:
+    name: build
+    # 内网 devpi 与镜像仓库只在自托管 runner 可达
+    runs-on: hygon-build
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    # 纯 python 构建，不依赖 DTK/GPU；任何带 python>=3.10 + pip 的镜像都能编，
+    # 这里只用内网 registry 里现成的镜像固定工具链，换镜像不影响产物。
+    container:
+      image: ${{ vars.HARBOR_SITE }}/hcu/base/dtk:26.10-ubuntu22.04-py3.12
+
+    env:
+      PYPI_URL: ${{ vars.PYPI_URL }}
+      # wheel 是纯 python，不按 DTK/torch/python 分版本；这个 token 只决定
+      # 上传到 nightly 归档的哪个目录（das_nightly/dtk<DTK_VER>）。
+      DTK_VER: '2610'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      # 戳由 build.sh 自己算（<时间>.g<commit6>）并在同一次运行里烙进 wheel；
+      # 构建后端（setuptools/wheel）缺失时 build.sh 会自己补装
+
+      - name: Build stamped wheel
+        run: |
+          bash packaging/build.sh
+          echo "=== wheels ==="
+          ls -lh dist/*.whl
+
+      - name: Upload nightly
+        env:
+          CIUPLOAD_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+            pip install --no-cache-dir ciupload -i https://pypi.sourcefind.cn/release/dtk/
+            CIUpload NIGHTLY \
+              --devpi_url "${PYPI_URL}" \
+              --password "${CIUPLOAD_PASSWORD}" \
+              --dtk_version "${DTK_VER}" \
+              --record \
+              -f dist/*.whl
+          fi
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: sglang-plugin-wheels
+          path: dist/*.whl
+          if-no-files-found: error
+
+      # 容器 job 以 root 运行, 会在共享 workspace 留下 root 文件,
+      # 导致同机器上其他 job 的 checkout 失败; 跑完清掉
+      - name: 清理 workspace
+        if: always()
+        run: rm -rf "${GITHUB_WORKSPACE}"/* "${GITHUB_WORKSPACE}"/.[!.]* || true

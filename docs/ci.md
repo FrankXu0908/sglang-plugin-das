@@ -25,9 +25,14 @@ python3 -m unittest discover -s tests -v
 
 ## 2. 自动化接入现状
 
-[.workflow/l0-gate.yml](../.workflow/l0-gate.yml) 目前仅保存 runner-neutral 命令配方，**未绑定托管 CI 平台**。本仓不声称已经在 push/MR 时自动执行，也没有常驻 watcher 或 GPU runner。
+GitHub Actions 已配置以下 workflow（配置文件存在不等于真实触发已验证）：
 
-接入时需明确平台、触发事件、Python 版本、工作目录、凭据使用方式、日志与退出码，再做一次真实触发验证。参考 adapter 的分层思路，不直接复制其镜像、硬件占用策略和已有门禁脚本。
+| 文件 | 触发 | 内容 | 依赖 |
+|---|---|---|---|
+| [.github/workflows/quality-gate.yml](../.github/workflows/quality-gate.yml) | PR | 复用 `HYGON-AI/quality-gate` 的 PR 门禁 | 组织复用 workflow |
+| [.github/workflows/nightly-wheel.yml](../.github/workflows/nightly-wheel.yml) | push `main` / 手动 dispatch | [packaging/build.sh](../packaging/build.sh) 构建 wheel；push 时经 CIUpload 上传 `das_nightly/dtk2610`，dispatch 只保留 artifact | 自托管 runner `hygon-build`、`vars.HARBOR_SITE`、`vars.PYPI_URL`、`secrets.PYPI_PASSWORD` |
+
+nightly 在构建期把版本打成 `<pyproject 版本>+hcu.<YYMMDDHHMM>.g<commit6>`，产物即最终包，不做上传后改写。[.workflow/l0-gate.yml](../.workflow/l0-gate.yml) 仍只是 runner-neutral 命令配方，nightly 不执行 L0 与单测；workflow 生效前需完成一次真实 push 触发核对并记录结果。
 
 ## 3. 验证分层与运行时门禁规划
 
