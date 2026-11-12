@@ -689,6 +689,14 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         prefix_len: int,
         preallocated_reqs: List[DecodeRequest],
     ) -> bool:
+        # Guard before touching DSV4-only pool attributes. With a decode-side
+        # radix cache enabled on a non-DSV4 model (e.g. Qwen3.8 QSA pools),
+        # `self.token_to_kv_pool` has no `compression_ratios`, and this path is
+        # reached on every prealloc once the cache is on. `_dsv4_inflight_prompt_reqs`
+        # already returns early in that case; this function must too, or
+        # `_dsv4_singleflight_min_prefix_len` raises AttributeError.
+        if not self._uses_dsv4_decode_radix_cache():
+            return False
         min_prefix_len = self._dsv4_singleflight_min_prefix_len()
         for inflight_req in self._dsv4_inflight_prompt_reqs(preallocated_reqs):
             if inflight_req is req:
