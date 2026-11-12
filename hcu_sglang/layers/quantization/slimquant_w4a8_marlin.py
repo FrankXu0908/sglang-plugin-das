@@ -1269,6 +1269,13 @@ class SlimQuantW4A8Int8MarlinMoEMethod:
                     layer.w2_weight_scale.data * scale_mul,
                     requires_grad=False,
                 )
+                if _is_hcu:
+                    masked = get_bool_env_var("SGLANG_USE_W4A8_MASKED_HIPC")
+                    contiguous = get_bool_env_var("SGLANG_USE_W4A8_CONTIGUOUS_HIPC")
+                    if masked or contiguous:
+                        from hcu_sglang.layers.moe.deepep_w4a8 import configure_hipc
+
+                        configure_hipc(layer, masked=masked, contiguous=contiguous)
             else:
                 # mxfp4_to_int4.py packs (even_k << 4) | odd_k with two's
                 # complement nibbles and stores scale/16 (the legacy lightop

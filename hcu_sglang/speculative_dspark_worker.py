@@ -2084,7 +2084,6 @@ class _WorkerMethods:
 
         if batch.forward_mode.is_idle():
             self._observers.note_idle_decode_step()
-            expert_distribution_metrics = None
             if get_parallel().attn_dp_enabled:
                 if self._draft_is_moe:
                     with self._draft_context():
@@ -2093,14 +2092,10 @@ class _WorkerMethods:
                     coordination_plan.apply(
                         batch, "target", rank, local_only=target_local_only
                     )
-                target_verify = self._verify_executor.run_idle_participation(
+                self._verify_executor.run_idle_participation(
                     batch=batch, idle_layout=self._idle_verify_ragged_layout(batch)
                 )
-                expert_distribution_metrics = target_verify.expert_distribution_metrics
-            return self._decode_idle_result(
-                on_publish=on_publish,
-                expert_distribution_metrics=expert_distribution_metrics,
-            )
+            return self._decode_idle_result(on_publish=on_publish)
 
         batch.seq_lens.record_stream(
             torch.get_device_module(self.device).current_stream()
@@ -2361,7 +2356,6 @@ class _WorkerMethods:
             new_seq_lens=accept.new_seq_lens,
         )
         return GenerationBatchResult(
-            expert_distribution_metrics=target_verify.expert_distribution_metrics,
             logits_output=logits_output,
             next_token_ids=accept.out_tokens.reshape(-1),
             accept_lens=accept.commit_lens,

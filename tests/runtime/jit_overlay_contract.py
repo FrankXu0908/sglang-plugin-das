@@ -31,6 +31,20 @@ class JitOverlayContractTests(unittest.TestCase):
         self.assertIn(str(C._OVERLAY_ROOT/'csrc/deepseek_v4/c_plan.cuh'),spec.translation_units()[0].source)
         self.assertIn('cuda.cu',ninja)
 
+    def test_overlay_flags_precede_loader_private_default_includes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cached_include = str(Path(folder) / "adapter-cache" / "include")
+            overlay_flag = f"-I{C._OVERLAY_ROOT / 'include'}"
+            with patch.object(N, "DEFAULT_INCLUDE", [cached_include]):
+                spec, ninja = self.capture(
+                    cuda_files=["deepseek_v4/c_plan.cuh"],
+                    extra_cuda_cflags=["-DKEEP_CALLER_FLAG"],
+                )
+            self.assertEqual(spec.include_paths[0], cached_include)
+            flags = next(line for line in ninja.splitlines() if line.startswith("cudaflags ="))
+            self.assertLess(flags.index(overlay_flag), flags.index(f"-I{cached_include}"))
+            self.assertIn("-DKEEP_CALLER_FLAG", flags)
+
     def test_explicit_external_source_is_preserved_and_unowned_source_uses_native_tree(self):
         with tempfile.TemporaryDirectory() as folder:
             external=Path(folder)/'external.cuh';external.write_text('int external;\n')

@@ -2034,6 +2034,63 @@ GPU 对测试进程不可见；仅将导入所需的硬件探测及构造所需�
 随后完整恢复修复。mRoPE 的 import error 来自禁用 GPU 后官方模块导入期硬件探测；
 使用上述 CPU 探测夹具后其 10 项测试均通过。未修改这些无关实现与测试来消除告警。
 
+## 2026-11-10 修复 plugin 与 adapter 组合的 JIT 头文件顺序
+
+- 基线：SGLang `baa9befa38`（v0.5.22）、adapter-das `0d5d73b`、sglang-plugin-das `c6ec4f5`。
+- DeepSeek V4 的 JIT 源码由 plugin 覆盖后，adapter 缓存的默认头文件路径仍可能优先命中旧版 `sgl_kernel/utils.cuh`。这会导致 SwiGLU 量化内核缺少 `SGL_GRID_CONSTANT`，也会导致 TopK V2 缺少 `coarse_bin_bounds` 等定义。
+- [JIT overlay loader](../hcu_sglang/jit_overlay_loader.py) 只对使用 overlay 源码的编译，把 plugin 头文件目录放在主机及 GPU 编译器参数的开头。[回归测试](../tests/runtime/jit_overlay_contract.py) 覆盖 adapter 持有独立默认路径列表时的 Ninja 参数顺序，并验证调用方编译参数仍然传递。
+- 实测：JIT overlay 合同测试 5 项通过。在启用 adapter 的 `gfx936` 容器内，用独立 JIT 缓存成功编译并加载 `silu_and_mul_clamp` 和 `topk_v2`，两份 Ninja 文件均将 plugin 头文件路径排在 adapter 缓存路径之前。探针日志为 `hcu-jit-overlay-fixed.Serpwy/probe.log`。
+- 验证范围：本次覆盖 JIT 编译、加载和头文件顺序。DP8/EP8 服务启动、DSpark 图捕获和内核数值结果未验证。
+
+## 2026-11-10 接入 SlimQuant W4A8 DeepEP masked HIPC
+
+- 基线：SGLang `baa9befa38`（v0.5.22）、adapter-das `0d5d73b`、sglang-plugin-das `c6ec4f5` 加工作区 JIT 头文件修复。对照 DAS `2c841655fe` 的 `forward_groupgemm_w4a8_marlin_masked`。
+- 范围：启用 `SGLANG_USE_W4A8_MASKED_HIPC` 且权重走 SlimQuant Marlin 的 DeepEP HIPC 打包时，仅配置 low-latency 为 INT8 dispatch。复用现有 `DeepEPMoE.run_moe_core` Hook；[masked 计算](../hcu_sglang/layers/moe/deepep_w4a8.py) 执行 gate/up GEMM、SiLU/带 clamp 的 INT8 量化及 down GEMM。保持 checkpoint scale 和 combine 的原始 TopK 元数据。
+- [回归](../tests/runtime/deepep_w4a8.py)：修改前复现 `forward_deepgemm_masked is deprecated`；修改后 adapter 组合测试 3 项通过，覆盖两段 GEMM、LL 配置与原调用委托。
+- 单卡：在 `gfx936` 上用模型 MoE 维度和 EP8 的每卡 32 专家构造合成输入，adapter 组合走到当前容器 `deepgemm` 的 masked HIPC 内核，首个 GEMM 选中 mode 1322 后返回 `no kernel image is available for execution on the device`。数值对拍和 Graph replay 未完成。
+- 本次在 masked 阶段停下供审阅。normal contiguous HIPC、DP8/EP8 + DSpark 服务启动与生成待后续验证。
+
+## 2026-11-10 接入 SlimQuant W4A8 DeepEP normal contiguous HIPC
+
+- 基线：SGLang `baa9befa38`（v0.5.22）、adapter-das `0d5d73b`、sglang-plugin-das `c6ec4f5` 加 JIT 和 masked 工作区改动。对照 DAS `2c841655fe` 的 `forward_deepgemm_w4a8_marlin_contiguous`。
+- 在已有 SlimQuant HIPC 打包分支中处理 `SGLANG_USE_W4A8_CONTIGUOUS_HIPC`。normal 模式只配置该路径的 INT8 dispatch 和 256 行专家对齐。[contiguous 计算](../hcu_sglang/layers/moe/deepep_w4a8.py) 复用 scatter/gather、SwiGLU clamp 量化和已打包的 HIPC 权重，gather 应用一次 TopK 权重后交给 normal combine。
+- [回归](../tests/runtime/deepep_w4a8.py)：修改前复现 `forward_deepgemm_contiguous is deprecated`；adapter 组合 6 项通过，覆盖 normal dispatch 的 INT8/对齐、空包和错位计数、加权 gather、masked 和已有分支委托。
+- 单卡：`gfx936`、32 专家、hidden 4096、intermediate 2048 的合成输入通过 scatter，首个 GEMM 报 `W4A8 WASP kernel launch failed`。另用手工构造的对齐 `m_indices` 直调 `deepgemm`（`2.1.0+das.dtk2610.b061ec7`），默认 mode 1006 复现同一报错，mode 1002 报 `no kernel image is available for execution on the device`。真实 GEMM 数值对拍、Graph 和 DP8/EP8 + DSpark 服务待验证。
+
+## 2026-11-11 修复 Uvicorn 多 tokenizer worker 的 SlimQuant 校验
+
+- SGLang v0.5.22 的 Uvicorn 子进程从 ASGI 导入字符串启动。子进程构建 ModelConfig 时需要先注册 plugin 的 SlimQuant 量化别名。
+- [HTTP worker 入口](../hcu_sglang/http_worker.py) 通过现有 Hook 注册链替换 SGLang 的多 worker ASGI 导入目标。子进程调用官方 load_plugins，再取得原 ASGI 应用。
+- 在 40539 的 HCU adapter 组合容器中，以两个独立进程执行真实 Uvicorn Config.load 和同一 checkpoint 的 ModelConfig 构造。旧入口复现 slimquant_w4a8 与 slimquant_marlin 不匹配，新入口解析为 slimquant_w4a8_marlin。L0 通过。完整八卡 HTTP 服务及 Granian 路径未验证。
+
+## 2026-11-11 对齐 DSpark verify 返回值
+
+- SGLang v0.5.22 的 TargetVerifyResult 只提供 logits_output 和 can_run_cuda_graph，idle verify 只参与集合通信。插件的两处指标读取导致正常和空闲 DP rank 都在 decode 阶段报 AttributeError。
+- [DSpark worker](../hcu_sglang/speculative_dspark_worker.py) 按上游返回值完成 decode，沿用 GenerationBatchResult 的可选指标默认值。prefill 仍从提供该字段的模型输出传递指标。
+- 本次覆盖源码与本地回归检查。真实请求和此前 GPU VMFault 待服务复测。
+
+## 2026-11-11 诊断 Torch FlashMLA KV 索引
+
+- 40539 的 HSA 队列异常和 Python 栈指向 DSpark eager verify 期间的索引操作。用 `SGLANG_DEBUG_FLASHMLA_KV_INDICES=1` 在 Torch FlashMLA gather 前核对 cache 容量。日志采样越界位置、页号和 topk_length。
+- 有效槽越界在 gather 前报错。被 topk_length 屏蔽的越界槽改为安全索引，并继续应用原有 logits mask。诊断只在 eager 路径同步检查。
+- 验证范围为 CPU 合成索引、启动脚本语法及 L0。实际请求与 VMFault 复测待运行。
+
+## 2026-11-11 定位 DSpark eager VMFault 的 GPU 提交范围
+
+- 17:43 的 VMFault 在 Torch FlashMLA 索引检查的同步点浮现。用 `SGLANG_DEBUG_DSPARK_VMFAULT_SYNC=1` 标记 non-compact target verify、target embedding 与 Torch FlashMLA 入口的当前流同步边界。
+- 每条日志包含 rank、阶段、设备和张量形状。同步前后分别打印 begin 和 done。检查仅在 eager 中运行，服务由用户复测。
+
+## 2026-11-11 定位 target verify 的 SWA 映射读取
+
+- 18:35 的 VMFault 出现在 target verify 开始同步成功后、词嵌入调用前。AQL 中的 6 个元素和 492545 的索引维度与 full-to-SWA 映射吻合。
+- 沿用 `SGLANG_DEBUG_DSPARK_VMFAULT_SYNC=1`，在目标模型的 SWA 映射前记录索引和表的设备指针、长度及最多 16 个输入位置。当前流同步分别覆盖读取输入位置之前和映射查询之后。日志区分 PyTorch 索引越界、-1 哨兵和其他负索引。
+- 现有映射行为保留。诊断只在 eager 的 target verify 模式执行，真实请求复测由用户启动。
+
+## 2026-11-11 修复 HCU speculative KV 槽位读取
+
+- 40539 未注册 vendor hcu_assign_extend_cache_locs 时，adapter 原 fallback 将未初始化的输出反向写入 req_to_token。DSpark 的第六个槽位越界使 SWA 索引 VMFault。切回官方实现后，99 次 target verify 完成并返回 HTTP 200。
+- 修复位于 adapter-das 的 hcu_adapter/kvcacheio_allocator.py。HCU 张量复用上游 Triton gather，CPU 兼容路径读取表并写满输出。回归覆盖 int32 表转 int64 输出、跨请求偏移和输入表保持原值。
+- 移除本轮添加的 SWA、DSpark 和 FlashMLA 临时日志及脚本开关。服务级复验仍需使用修复后的 HCU 入口。
 ## 2026-11-10 hook 目标守卫：启动 traceback 归零
 
 问题来源：2026-11-09 Qwen3.8-Flash-Next W4A8 PD 压测的 `psg.out` / `dsg.out` 各含 226 条 traceback，其中 210 条是 `Failed to apply hooks to <target>`，覆盖 15 个目标 × 7 进程 × 2 次启动；另有 16 条 adapter 侧 `No module named 'cuda'`。服务运行期零 traceback，压测 1269 条请求全 200。分析见 `811/sglang-pd-log-analysis-20261110/`。

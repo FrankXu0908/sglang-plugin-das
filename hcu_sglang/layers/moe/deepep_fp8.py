@@ -597,6 +597,20 @@ def around_process_weights(original, scheme, layer):
 
 
 def around_run_moe_core(original, layer, dispatch_output, *args, **kwargs):
+    if _is_hcu and getattr(layer, "_hcu_slimquant_w4a8_hipc", False):
+        from sglang.srt.layers.moe.token_dispatcher import DispatchOutputChecker
+
+        if DispatchOutputChecker.format_is_deepep_ll(dispatch_output):
+            from hcu_sglang.layers.moe.deepep_w4a8 import run_masked_moe_core
+
+            return run_masked_moe_core(layer, dispatch_output)
+    if _is_hcu and getattr(layer, "_hcu_slimquant_w4a8_contiguous_hipc", False):
+        from sglang.srt.layers.moe.token_dispatcher import DispatchOutputChecker
+
+        if DispatchOutputChecker.format_is_deepep_normal(dispatch_output):
+            from hcu_sglang.layers.moe.deepep_w4a8 import run_contiguous_moe_core
+
+            return run_contiguous_moe_core(layer, dispatch_output)
     if _is_hcu and getattr(layer, "use_int8_w8a8_deepgemm", False):
         from hcu_sglang.layers.moe.deepep_int8 import run_moe_core
         return run_moe_core(layer, dispatch_output)
