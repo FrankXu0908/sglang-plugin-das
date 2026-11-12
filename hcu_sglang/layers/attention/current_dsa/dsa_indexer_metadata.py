@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
@@ -112,6 +113,18 @@ class DSAIndexerMetadata(BaseIndexerMetadata):
     paged_mqa_schedule_metadata: Optional[torch.Tensor] = None
     paged_mqa_ctx_lens_2d: Optional[torch.Tensor] = None
     force_unfused_topk: bool = False
+
+    @cached_property
+    def mqa_request_slices(self):
+        from hcu_sglang.layers.attention.current_dsa.mqa_request_split import (
+            plan_mqa_request_slices,
+        )
+
+        return plan_mqa_request_slices(
+            self.get_dsa_extend_len_cpu(),
+            self.get_indexer_seq_len_cpu().tolist(),
+            envs.SGLANG_DSA_MQA_SPLIT_MIN_SAVED_CELLS.get(),
+        )
 
     def get_seqlens_int32(self) -> torch.Tensor:
         return self.attn_metadata.cache_seqlens_int32

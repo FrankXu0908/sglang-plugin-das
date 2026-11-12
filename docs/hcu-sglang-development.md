@@ -2832,3 +2832,14 @@ SGLang `0.5.18+dtk2604.torch2110.2610211227.g414c32`）运行：
 Channel FP8 依赖配套 adapter 的 DeepEP 量化粒度透传。上述环境还使用部署目录中的 DeepGEMM v4 兼容扩展，该扩展不在两仓提交内；AITER custom all-reduce 初始化存在回退警告，通信后端未验收。公共 ForwardBatch、FP8 路径改动尚无 HY4 回归证据。
 
 早期 0.9 显存配方曾 OOM，8 并发曾出现 NEXTN padding 失败，未按这两个原始配方复验。环境变量治理、与 sglang-das 0.5.18 的同条件性能和精度对照仍未完成。上述模型结果不能代替这些验收项。
+## 2026-11-12 PR #41 的评审修复与变基后验收边界
+
+本轮将 PR 变基到 plugin main `b7d4356`，保留该基线的 DeepEP clean-buffer top-k 与 nightly wheel 变更。`architecture.html` 的冲突通过 `tools/build_guide.py` 从合并后的源文档重新生成。四个 MQA 运行时修改文件与旧 PR head `d557ddd` 逐字节一致；本轮没有改变 LightOp API、分组门控、默认配置、索引顺序或量化语义。
+
+按 reviewer 点名的范围增加 `tests/test_mqa_request_split.py`，直接加载零依赖规划器，不导入框架或设备库。九项 CPU 测试通过，覆盖空输入和全零 Q、单请求、部分分组优于两种极端划分、阈值相等时保留更多分组、完整切片回退、零 Q 请求跨 K 边界与两端裁剪、一字节预算的逐行分块、零预算和非法长度/阈值。它们验证规划与坐标，不代表 native kernel、Graph 或整模型通过。
+
+提交前按 CI 的 Ruff 0.12.1 E9/F63/F7/F82（ignore-noqa）规则检查全部 PR Python 文件，并执行语法、L0、导览重建与 `--check`、`git diff --check`。GitHub CI 独立记录结果；没有在本机运行完整测试套件。
+
+变基后完整组合的真机重验明确为 **pending**，由 [#47](https://github.com/HYGON-AI/sglang-plugin-das/issues/47) 记录两 PR 的提交、实际安装库与输入绑定，以及全部实际工作 rank 的调用链、小样本 logits/消费者对照和 P0/P1 延迟接受条件。历史 `glm5.3-mqa-validation-20261111.json` 保留原有来源和 frozen #27/#62 组合边界，未改为当前 head 已通过；历史 HMMT/HumanEval 差异仍未归因。
+
+本轮浏览器截图、交互与窄屏复核未执行：浏览器工具的 URL 安全策略拒绝 `file://` 协议。已执行导览重建与快照检查，未将结构检查记作截图验收。

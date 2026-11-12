@@ -94,10 +94,13 @@ from sglang.srt.layers.attention.dsa.utils import aiter_can_use_preshuffle_paged
 from hcu_sglang.layers.attention.current_dsa.paged_mqa_logits_backend import DSAPagedMQALogitsBackend
 from hcu_sglang.utils.detection import is_hcu
 _is_hcu = is_hcu()
+_HCU_MQA_REQUEST_SPLIT_LOGGED = False
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip and not _is_hcu
 _use_aiter_preshuffle = not _is_hcu and aiter_can_use_preshuffle_paged_mqa()
 from hcu_sglang.layers.attention.current_dsa.rotation import rotate_activation, hadamard_transform_optimized
 from hcu_sglang.layers.attention.current_dsa.forward_batch_utils import effective_forward_mode
+from hcu_sglang.layers.attention.current_dsa.dsa_topk_backend import TopkTransformMethod
+from hcu_sglang.layers.attention.current_dsa.mqa_request_split import iter_mqa_chunks
 from hcu_sglang.layers.attention.current_dsa.hcu_sparse_mqa import lightop_sparse_mask_api_available, select_lightop_sparse_mqa_route
 from hcu_sglang.layers.attention.current_dsa.gate_scale import fused_get_logits_head_gate_triton
 from hcu_sglang.mem_cache.dsa_index_cache_mode import IndexKCacheMode
@@ -133,6 +136,8 @@ def _hcu_mqa_logits(
     ks: torch.Tensor,
     ke: torch.Tensor,
     kv_scale: Optional[torch.Tensor],
+    *,
+    clean_logit: bool = True,
 ) -> torch.Tensor:
     return lightop_attention.mqa_logits(
         q,
@@ -141,7 +146,7 @@ def _hcu_mqa_logits(
         ks,
         ke,
         kv_scale=kv_scale,
-        clean_logit=True,
+        clean_logit=clean_logit,
     )
 
 if TYPE_CHECKING:
@@ -1791,6 +1796,8 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
         metadata: BaseIndexerMetadata,
         topk_result: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        global _HCU_MQA_REQUEST_SPLIT_LOGGED
+
         if TYPE_CHECKING:
             assert isinstance(get_token_to_kv_pool(), DSATokenToKVPool)
 
@@ -1907,7 +1914,28 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                 rocm=_is_hip,
             )
 
-        if not need_chunk:
+        align_mqa_requests = (
+            _is_hcu
+            and envs.SGLANG_DSA_MQA_SPLIT_BY_SEQ.get()
+            and self.hcu_glm_dsa_bf16_head_gates
+            and self._use_hcu_int8_index_cache(pool)
+            and use_bf16_index_cache
+            and q_fp8.dtype == kv_bf16.dtype == torch.bfloat16
+            and metadata.topk_transform_method == TopkTransformMethod.RAGGED
+            and metadata.topk_backend.is_sgl_kernel()
+            and not metadata.topk_backend.should_use_topk_v2()
+            and not metadata.force_unfused_topk
+            and envs.SGLANG_DSA_FUSE_TOPK.get()
+            and metadata.attn_metadata.topk_indices_offset is not None
+            and self.num_init_tokens == self.num_local_tokens == 0
+            and not get_is_capture_mode()
+            and not torch.cuda.is_current_stream_capturing()
+        )
+        group_slices = metadata.mqa_request_slices if align_mqa_requests else ()
+        if group_slices:
+            assert group_slices[-1][1] == q_offset
+
+        if not need_chunk and not group_slices:
             assert q_fp8[:q_offset].shape[0] != 0
             with self._with_real_sm_count():
                 if use_bf16_index_cache:
@@ -1918,6 +1946,7 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                         ks,
                         ke,
                         kv_scale=None,
+                        clean_logit=not align_mqa_requests,
                     )
                 elif _is_hcu:
                     kv, scale = kv_fp8
@@ -1975,10 +2004,6 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             topk_result[:q_offset] = raw_topk_result
             return topk_result
 
-        bytes_per_row = k_offset * MQA_LOGITS_BYTES_PER_ELEM
-        max_rows = max(1, int(logits_budget_bytes // max(bytes_per_row, 1)))
-        max_rows = min(max_rows, q_offset)
-
         global_topk_offset = metadata.attn_metadata.topk_indices_offset
         cu_seqlens_q_full = None
         if global_topk_offset is None:
@@ -1992,19 +2017,23 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                 f"topk_indices_offset too short: {global_topk_offset.shape[0]} < {q_offset}"
             )
 
-        start = 0
-        while start < q_offset:
-            end = min(start + max_rows, q_offset)
+        slices = group_slices or ((0, q_offset, 0, k_offset),)
+        for start, end, k_start, k_end in iter_mqa_chunks(
+            slices, logits_budget_bytes, MQA_LOGITS_BYTES_PER_ELEM
+        ):
+            chunk_ks = ks[start:end] - k_start if group_slices else ks[start:end]
+            chunk_ke = ke[start:end] - k_start if group_slices else ke[start:end]
 
             with self._with_real_sm_count():
                 if use_bf16_index_cache:
                     logits_chunk = _hcu_mqa_logits(
                         q_fp8[start:end],
-                        kv_bf16,
+                        kv_bf16[k_start:k_end],
                         weights[start:end].to(torch.float32),
-                        ks[start:end],
-                        ke[start:end],
+                        chunk_ks,
+                        chunk_ke,
                         kv_scale=None,
+                        clean_logit=not align_mqa_requests,
                     )
                 elif _is_hcu:
                     kv, scale = kv_fp8
@@ -2053,7 +2082,7 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                     )
 
             lengths_chunk = seq_lens_expanded[start:end]
-            self._mask_init_and_local_tokens(logits_chunk, lengths_chunk, ks[start:end])
+            self._mask_init_and_local_tokens(logits_chunk, lengths_chunk, chunk_ks)
 
             # RAGGED: use global offset; PAGED: construct local cu_seqlens_q per chunk
             if global_topk_offset is not None:
@@ -2070,14 +2099,24 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             raw_topk_chunk = metadata.topk_transform(
                 logits_chunk,
                 self.index_topk,
-                ks=ks[start:end],
+                ks=chunk_ks,
                 cu_seqlens_q=cu_seqlens_q_chunk,
                 ke_offset=lengths_chunk,
                 batch_idx_list=batch_idx_chunk,
                 topk_indices_offset_override=topk_offset_chunk,
             )
             topk_result[start:end] = raw_topk_chunk
-            start = end
+            if align_mqa_requests:
+                del logits_chunk
+
+        if align_mqa_requests and group_slices and not _HCU_MQA_REQUEST_SPLIT_LOGGED:
+            logger.info(
+                "HCU MQA request split active: q=%d k=%d groups=%d clean_logit=False",
+                q_offset,
+                k_offset,
+                len(group_slices),
+            )
+            _HCU_MQA_REQUEST_SPLIT_LOGGED = True
 
         return topk_result
 
