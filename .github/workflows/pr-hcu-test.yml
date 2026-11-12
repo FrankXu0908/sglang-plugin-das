@@ -1,0 +1,100 @@
+name: HCU MR CI (K8s)
+
+on:
+  pull_request_target:
+    branches:
+        - main
+        # release 线是单 whl 打包模型（只有 sgl-kernel，含 hcu_adapter/）
+        - 'release/**'
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  workflow_dispatch:
+    inputs:
+        pr-number:
+            description: 'PR number to merge into the selected branch (leave empty to test the branch as-is)'
+            required: false
+            default: ''
+        pip_index_url:
+            description: 'pip index url'
+            required: false
+            default: ''
+        pip_trusted_host:
+            description: 'pip trusted host'
+            required: false
+            default: ''
+permissions:
+  contents: read
+
+concurrency:
+  group: hcu-mr-k8s-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PIP_TRUSTED_HOST: ${{ inputs.pip_trusted_host || vars.PIP_TRUSTED_HOST }}
+  PIP_INDEX_URL: ${{ inputs.pip_index_url || vars.PIP_INDEX_URL }}
+
+jobs:
+  image:
+    name: resolve CI image
+    # container.image 在检出之前就求值，读不到仓库里的文件；只能先在前置 job 里读出来，再用 needs 传给后两个 job
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.read.outputs.image }}
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          # 镜像属于基础设施，取基线分支的版本：PR 里改 ci/ci_docker_image 不会影响本次运行（要试新镜像就合入基线）
+          ref: ${{ github.event.pull_request.base.ref || github.ref }}
+          persist-credentials: false
+          
+      - name: Read ci/ci_docker_image
+        id: read
+        run: |
+          set -euo pipefail
+          # main 与 release 线都带这个文件；缺失就意味着基线分支漏提交了基础设施
+          # 文件，直接失败比悄悄用别的镜像跑绿更安全
+          [ -f ci/ci_docker_image ] \
+            || { echo "::error::基线分支没有 ci/ci_docker_image"; exit 1; }
+          image="$(tr -d '[:space:]' < ci/ci_docker_image)"
+          # 平台要求用 digest 固定镜像，tag 只作说明；没有 digest 就在这里报错，别等到拉镜像那步才失败
+          case "$image" in
+            *@sha256:*) ;;
+            *) echo "::error::ci/ci_docker_image 必须是 <repo>:<tag>@sha256:<digest>，实际是 '$image'"; exit 1 ;;
+          esac
+          echo "用镜像: $image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+  l0:
+    name: L0 structural gate
+    # L0 刻意零依赖（docs/ci.md 设计取舍），用不到卡和镜像，放云端 runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref || github.ref }}
+          fetch-depth: 0
+          # Keep the token out of .git/config so PR code cannot read it.
+          persist-credentials: false
+
+      - name: Merge PR into base
+        if: github.event_name == 'pull_request_target' || inputs.pr-number != ''
+        env:
+          # Pass via env instead of inline ${{ }} so a manual input cannot inject shell commands.
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr-number }}
+          # The repo is private, so the fetch needs a token; pass it only to this one command so it never lands in .git/config.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 容器里 workspace 常以别的 uid 挂进来，git 会以 dubious ownership 拒绝操作
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          auth=$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)
+          git -c http.extraheader="AUTHORIZATION: basic ${auth}" \
+            fetch "https://github.com/${GITHUB_REPOSITORY}.git" "pull/${PR_NUMBER}/head:pr"
+          git merge --no-ff --no-edit pr
+      - name: L0 gate
+        timeout-minutes: 5
+        run: python3 ci/l0_gate.py
