@@ -14,6 +14,10 @@
 #include <cmath>
 #include <cstdint>
 
+#ifndef SGL_GRID_CONSTANT
+#define SGL_GRID_CONSTANT __grid_constant__
+#endif
+
 namespace sglang {
 
 // Hash routing ignores scores, so an all-underflowed row would renorm 0/0 to NaN.

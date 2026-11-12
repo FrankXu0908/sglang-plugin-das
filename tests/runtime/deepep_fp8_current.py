@@ -30,6 +30,48 @@ class DeepEPFp8Tests(unittest.TestCase):
         with patch.object(deepgemm,'m_grouped_fp8_gemm_nt_masked',side_effect=gemm),patch.object(H,'fuse_silu_mul_fp8_quant_ep',side_effect=quant):result=H.forward_groupgemm_w8a8_fp8_masked(layer,out)
         self.assertEqual(len(calls),2);self.assertIs(calls[0][0][0],q);self.assertIs(calls[0][0][1],s);self.assertIs(calls[1][0][0],a2);self.assertIs(calls[1][0][1],s2);self.assertEqual(result.shape,(2,3,128));self.assertEqual(result.max().item(),2.)
 
+    def test_masked_compacts_strided_scales_at_both_gemm_boundaries(self):
+        import deepgemm
+        q = torch.ones(2, 3, 128)
+        scale = torch.arange(12, dtype=torch.float32).reshape(2, 3, 2)[..., :1]
+        scale2 = scale + 1
+        scale2 = torch.stack((scale2, scale2), dim=-1)[..., 0]
+        self.assertFalse(scale.is_contiguous())
+        self.assertFalse(scale2.is_contiguous())
+        expected_scales = [scale.clone(), scale2.clone()]
+        masked = torch.tensor([2, 1], dtype=torch.int32)
+        packet = H.D.DeepEPLLDispatchOutput(
+            q, scale, torch.zeros(1, 2, dtype=torch.int64),
+            torch.ones(1, 2), masked, 2,
+        )
+        layer = SimpleNamespace(
+            moe_runner_config=SimpleNamespace(activation="silu", swiglu_limit=None),
+            w13_weight_deepgemm=torch.ones(2, 16, 128),
+            w2_weight_deepgemm=torch.ones(2, 128, 8),
+            w13_weight_scale=torch.ones(2, 16, 1),
+            w2_weight_scale=torch.ones(2, 128, 1),
+        )
+        calls = []
+
+        def gemm(a, b, result, counts, expected, **kwargs):
+            self.assertTrue(a[1].is_contiguous(), "a_scale must be contiguous")
+            torch.testing.assert_close(a[1], expected_scales[len(calls)], rtol=0, atol=0)
+            self.assertIs(counts, masked)
+            self.assertEqual(expected, 2)
+            calls.append(a)
+            result.fill_(len(calls))
+
+        with patch.object(deepgemm, "m_grouped_fp8_gemm_nt_masked", side_effect=gemm), patch.object(
+            H, "fuse_silu_mul_fp8_quant_ep",
+            return_value=(torch.ones(2, 3, 8), scale2),
+        ):
+            result = H.forward_groupgemm_w8a8_fp8_masked(layer, packet)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result.shape, (2, 3, 128))
+        self.assertEqual(result.max().item(), 2)
+        torch.testing.assert_close(scale, expected_scales[0], rtol=0, atol=0)
+        torch.testing.assert_close(scale2, expected_scales[1], rtol=0, atol=0)
+
     def test_combine_packet_retains_router_ids_and_weights(self):
         q=torch.ones(2,3,8);s=torch.ones(2,3,1);ids=torch.zeros(1,2,dtype=torch.int64);weights=torch.full((1,2),.5);out=H.D.DeepEPLLDispatchOutput(q,s,ids,weights,torch.ones(2,dtype=torch.int32),2);value=torch.ones_like(q,dtype=torch.bfloat16)
         with patch.object(H,'_use_hcu_legacy_channel_fp8_deepep',return_value=True),patch.object(H,'forward_groupgemm_w8a8_fp8_masked',return_value=value):r=H.around_run_moe_core(lambda *a:None,object(),out)

@@ -531,7 +531,7 @@ def forward_groupgemm_w8a8_fp8_masked(
     from deepgemm import m_grouped_fp8_gemm_nt_masked
 
     m_grouped_fp8_gemm_nt_masked(
-        (hidden_states, hidden_states_scale),
+        (hidden_states, hidden_states_scale.contiguous()),
         (w13_weight, w13_scales),
         gateup_output,
         masked_m,
@@ -560,7 +560,7 @@ def forward_groupgemm_w8a8_fp8_masked(
         )
 
     m_grouped_fp8_gemm_nt_masked(
-        (q_a2_all, q_a2_scale),
+        (q_a2_all, q_a2_scale.contiguous()),
         (w2_weight, w2_scales),
         down_output,
         masked_m,

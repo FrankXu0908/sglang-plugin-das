@@ -22,6 +22,27 @@ class DeepEPCurrentTests(unittest.TestCase):
                 self.assertIs(out['x'],x);self.assertIs(out['topk_weight'],weights);self.assertEqual(out['quant_type'],qt);self.assertEqual(out['quant_group_size'],group)
             with self.assertRaises(RuntimeError):D._low_latency_dispatch_compat(b,x,ids,weights,128,256,use_fp8=False,use_nvfp4=True,input_global_scale=None,round_scale=False,use_ue8m0=False,async_finish=True,return_recv_hook=False)
 
+    def test_channel_fp8_dispatch_requests_per_token_scales_through_bridge(self):
+        calls = []
+        packet = (object(), object(), object(), object(), object())
+        buffer = SimpleNamespace(low_latency_dispatch=lambda *args, **kwargs: calls.append(kwargs) or packet)
+        worker = SimpleNamespace(
+            quant_config={"hcu_legacy_groupgemm": True}, use_fp8=True,
+            use_nvfp4=False, return_recv_hook=False,
+            num_max_dispatch_tokens_per_rank=128, num_experts=192,
+            _get_buffer=lambda: buffer,
+            _get_npu_mxfp_quantization_kwargs=lambda _: {},
+        )
+        with patch.object(D, "_DEEPEP_LL_DISPATCH_USES_QUANT_TYPE", False), patch.object(
+            D, "_deepep_precompile_tp_barrier"
+        ), patch.object(D, "_is_hcu", True):
+            D._DeepEPDispatcherImplLowLatency._dispatch_core(
+                worker, torch.ones(1, 4096), torch.zeros(1, 8), torch.ones(1, 8)
+            )
+        self.assertEqual(calls[0]["quant_group_size"], 0)
+        self.assertTrue(calls[0]["use_fp8"])
+        self.assertFalse(calls[0]["use_ue8m0"])
+
     def test_hcu_deepgemm_requires_selected_backend_and_non_slimquant(self):
         for available,selected,quant,expected in [(True,True,'compressed-tensors',True),(True,False,'compressed-tensors',False),(False,True,'compressed-tensors',False),(True,True,'slimquant_w4a8_marlin',False)]:
             with patch.object(D,'_hcu_deepgemm_available',available),patch.object(D,'get_moe_runner_backend',return_value=SimpleNamespace(is_deep_gemm=lambda:selected)),patch.object(D,'get_model',return_value=SimpleNamespace(quantization=quant)):

@@ -16,6 +16,10 @@
 #include <cassert>
 #include <cstdint>
 
+#ifndef SGL_GRID_CONSTANT
+#define SGL_GRID_CONSTANT __grid_constant__
+#endif
+
 namespace sglang {
 
 struct StoreKVCacheParams {

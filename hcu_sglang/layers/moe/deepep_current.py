@@ -1355,6 +1355,11 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                     input_global_scale=input_global_scale,
                     round_scale=fp8_deepgemm_scale_opts.get("round_scale", False),
                     use_ue8m0=fp8_deepgemm_scale_opts.get("use_ue8m0", False),
+                    **(
+                        {"quant_group_size": 0}
+                        if _is_hcu and self.quant_config.get("hcu_legacy_groupgemm", False)
+                        else {}
+                    ),
                     **npu_mxfp_quantization_opts,
                     async_finish=not self.return_recv_hook,
                     return_recv_hook=self.return_recv_hook,
