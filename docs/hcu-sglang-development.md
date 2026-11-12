@@ -1538,6 +1538,44 @@ python3 tools/validate_plugin_runtime.py \
 
 已知限制与下一步：b4ae852 的 PD 集成面向内部 fork API 面，建议对官方 sglang 的兼容矩阵单独盘查；非 PD 服务路径经本修复在官方 v0.5.22 线端到端恢复。
 
+
+## 2026-11-04 DeepSeek V4 execution 的 HCU 分发与 adapter 组合
+
+固定 official baa9befa、plugin 0aa4114d、adapter 918f850d，在 gfx938 TP8 构造 DeepSeek-V4.1 时，adapter 暴露的 CUDA 语义使 owned execution/core 误选 CUDA residual boundary，导入固定官方版本不存在的 PendingUpdateRead。owned attention 已按真实 HCU 硬件避开这一分支，execution 仍直接沿用官方模块的合成标记；其实际 decoder 类却固定为 NonCudaDecoderMixin，构造与 forward 协议不一致。
+
+修复在 owned execution 模块内按 is_hcu 选择既有 HCU 执行分支，与 owned attention 保持一致。未更改官方判定、torch.version、设备架构或 FP8 常量；未向官方源码增加缺失类。Hook 目标集合不变。
+
+新增真实 HCU 平台构造回归，不再 mock 掉触发问题的 CUDA 标记，保留公共 Hook 后的 model constructor，在昂贵层分配处截断并检查 final_read/stage_facts 为平台路径、5 条 stream 及原生 factory 签名。修复前已复现相同 ImportError；修复后 6 项 runtime 回归通过，L0 通过，仓库 117 项测试中 104 过、13 跳。
+
+第二次原配置 TP8 已完成目标模型加载，在 DSPARK 草稿模型构造触发相同分支错误。草稿方法绑定到官方模块 globals，故在 owned 方法的构造/forward 判据中显式排除 HCU，保留官方模块 _is_cuda 的原值。新增草稿构造与两 stage 状态传递回归，修复前分别复现 PendingUpdateRead ImportError 和缺失 pre 参数（随后 cleanup 又引用不存在的 residual_batch.clear）。修复后草稿 runtime 8 项通过，未通过关闭 DSPARK 绕过。
+
+第三次完成目标及草稿模型加载，在 DsparkVerifyEpilogue 构造处因官方缺少 simulate_fold keyword 失败。新增窄工厂兼容：provider 声明该参数时原样传递，未声明且关闭时按原生签名构造，未声明却请求开启时明确拒绝；后续读取缺失属性按不支持模拟处理，不隐藏 provider 的其他异常。真实官方 CPU epilogue 的构造、begin_static_step 变输入缓冲、拒绝开启和支持该接口的 provider 回归共 3 项通过。完整服务结果待记录；这些夹具不证明模型精度、Graph 或全部分布式模式通过。
+
+第四次已进入 Graph 捕获，但 owned Top-K v2 源码编译时误用了旧版头文件。
+adapter-das 的 `jit_sources` 在绑定时复制 DEFAULT_INCLUDE，屏蔽了后续
+plugin 注册的头文件优先级。修复归 adapter 的既有编译接缝：调用时读取
+同一共享列表，保留原 loader 对象、HIP 输入缓存与 provider 注册表。
+plugin 的 JIT 契约测试同时检查有效 baseline 的未覆盖 source，兼容
+adapter 内容寻址路径，不把官方源码原路径硬编码为唯一合法来源。
+新增真实 Top-K v2 编译、paged/raw 索引数值和变输入 Graph 回归。
+
+本轮组合修复实际验证：BuildSpec 4/4；gfx938 Top-K v2 冷编译与
+paged/raw 精确索引及变输入 Graph 2/2；adapter 离线/官方源码两臂
+18 passed、16 skipped（额外编译矩阵未启用）。CPU 首轮临时目录位于
+/home/.git 内触发缓存隔离拒绝，改用 /tmp 后通过；失败日志保留。
+两仓 L0 通过，plugin 仓库 unittest 104 passed、13 skipped。
+
+第五次切换空闲节点，以新建隔离 plugin wheel 保留 TP8/DP1/EP1、
+DSPARK 与 decode Graph；目标/草稿权重加载完成，部分 rank 已开始
+Graph，TP1 在官方 init_cublas 的矩阵预热中遇到 HIPBLAS_STATUS_ALLOC_FAILED。
+同 rank 在内存池初始化后仍报告 21.47 GB 空闲，不能仅凭错误名认定
+显存耗尽。期间宿主出现其他 GPU 测试进程，另一节点也已有八卡服务；
+按本次用户资源边界暂停新的 GPU 运行，未清理外部进程或重置设备。
+本轮服务未 ready，精度未运行；也未声明全量 Hook 合同通过
+（14 个 multimodal_gen 目标未应用）。运行中核对官方原仓与验证副本
+10,592 个 tracked 文件均无变化。后续先取得可用八卡窗口，再复验
+hipBLAS 初始化、完整 Graph 与确定性请求；当前仍是未完成的模型验收。
+
 ## 2026-11-03 投机首启崩溃修复（draft_swa_window 垫值）
 
 官方基线投机路径首跑（TP2、NEXTN、fa3、page64、Qwen3.6-27B）在 Scheduler.__init__ → build_kv_cache 的 AROUND 钩子崩溃：cache_retention.py 读取 draft.draft_swa_window，官方 v0.5.22 的 EAGLEWorkerV2 无该属性（官方树全仓 0 命中，系内部 fork 表面属性）。非投机路径 draft 为 None 不触发，故此前的非 spec 服务全绿。
@@ -2172,3 +2210,24 @@ bw47 环境本身跑不动这套组合，需要先补五项前置条件（均为
 5. `pip install -e . --no-deps --no-build-isolation`：bw47 没有 editable 安装，`sglang.srt.plugins` entry_point 为空（`[]`），插件完全不会被加载。安装前需 `git config --global --add safe.directory` 两仓路径，否则 setuptools 读版本号时因 dubious ownership 失败。
 
 `hook_guard` 在 bw47 上还额外验证了一个设计点：`apply_hooks` 用 `try/finally` 发汇总，即使 `register()` 中途抛异常（如上述缺 scipy），汇总仍会照常打印——日志里能看到汇总行出现在 `register()` 失败之后。
+## 2026-11-05 DeepSeek V4.1 TP8 首次生成的 KV 索引与 DSPARK 结果
+
+固定 official baa9befa、plugin 0aa4114d、adapter 918f850d。原配方在 gfx938
+捕获 20 个 target verify 图后出现 VMFault。驱动队列记录了 5 个 8 字节索引元素。
+在真实 loader 的 cache-locs Hook 上复现：读取两行各 6 个槽位导致请求表
+12/32 个元素变化。当前 adapter 的无 vendor 算子回退把未初始化的输出反写入表。
+plugin 保留 OOT provider 优先级，只在注册了对应 vendor 算子时调用它，
+否则委托 AROUND 的有效 original。原 target 集合及 env 契约不变。
+GPU 回归验证输出、表只读和改变行/偏移的 Graph 重放；固定官方 OOT
+dispatch nodeid 通过。仅此 Hook 的调用路径纳入本轮范围。
+
+独立诊断轮中 live/static 草稿槽位相同，执行越过 target verify 后遇到第二个错误：
+固定官方 TargetVerifyResult 无 expert_distribution_metrics，接收方
+GenerationBatchResult 有此可选字段。插件在读取时处理缺省，保留支持该
+字段的 provider 值。诊断代码只用于取证，交付 wheel 移除。
+最终 wheel SHA256 为 9604f68990a3b68c907163c9261cc4f83e656ac02f4e95ed9dc565e8083af526；
+721 个包文件与安装目录、plugin 源码一致。nmz107 在 2026-11-05 第八轮使用
+原始 TP8/DP1/EP1、DSPARK、完整 decode Graph 配方启动，五题得到 323、
+Berlin、Tokyo、LANTERN-8306、12，均为 stop。请求后健康检查 HTTP 200。
+官方仓库与验证副本的 10,592 个 tracked 文件哈希一致。此结果覆盖本次短问答；
+原始 JSON 和服务日志在验证目录 logs/nmz107/attempt-8。两项修复均位于 plugin。

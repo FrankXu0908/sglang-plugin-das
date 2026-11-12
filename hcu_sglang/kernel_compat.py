@@ -65,7 +65,8 @@ def around_assign_extend_cache_locs_func(
 
     from sglang.srt.utils import get_bool_env_var
 
-    if not get_bool_env_var("SGLANG_ASSIGN_EXTEND_CACHE_LOCS", default="true"):
+    gather = getattr(torch.ops.sgl_kernel, "hcu_assign_extend_cache_locs", None)
+    if gather is None or not get_bool_env_var("SGLANG_ASSIGN_EXTEND_CACHE_LOCS", default="true"):
         return original(
             req_pool_indices,
             req_to_token,
@@ -76,12 +77,10 @@ def around_assign_extend_cache_locs_func(
             device,
         )
 
-    from sgl_kernel.kvcacheio import hcu_assign_extend_cache_locs
-
     out_cache_loc = torch.empty(
         (batch_size * draft_token_num,), dtype=torch.int64, device=device
     )
-    hcu_assign_extend_cache_locs(
+    gather(
         req_pool_indices,
         req_to_token,
         start_offset,

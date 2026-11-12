@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock,patch
 from hcu_sglang import jit_overlay_loader as C
 from sglang.kernels.jit.utils import load_jit as early_load
-from sglang.kernels.jit.utils.compile import loader as N
+from sglang.kernels.jit.utils.compile import loader as N, spec as S
 from sglang.kernels.jit.utils.compile.paths import DEFAULT_INCLUDE,KERNEL_PATH
 from sglang.srt.plugins.hook_registry import HookRegistry
 
@@ -45,7 +45,7 @@ class JitOverlayContractTests(unittest.TestCase):
             self.assertLess(flags.index(overlay_flag), flags.index(f"-I{cached_include}"))
             self.assertIn("-DKEEP_CALLER_FLAG", flags)
 
-    def test_explicit_external_source_is_preserved_and_unowned_source_uses_native_tree(self):
+    def test_explicit_external_source_is_preserved_and_unowned_source_uses_effective_baseline(self):
         with tempfile.TemporaryDirectory() as folder:
             external=Path(folder)/'external.cuh';external.write_text('int external;\n')
             spec,_=self.capture(cuda_files=[str(external)])
@@ -53,7 +53,8 @@ class JitOverlayContractTests(unittest.TestCase):
         candidates=[p for p in (KERNEL_PATH/'csrc').rglob('*.cuh') if not (C._OVERLAY_ROOT/'csrc'/p.relative_to(KERNEL_PATH/'csrc')).is_file()]
         self.assertTrue(candidates)
         relative=candidates[0].relative_to(KERNEL_PATH/'csrc').as_posix()
-        spec,_=self.capture(cuda_files=[relative]);self.assertEqual(Path(spec.cuda_files[0]),candidates[0])
+        expected=Path(S.resolve_sources([relative])[0])
+        spec,_=self.capture(cuda_files=[relative]);self.assertEqual(Path(spec.cuda_files[0]),expected)
 
     def test_header_preference_is_idempotent_and_preserves_native_include_entries(self):
         before=list(DEFAULT_INCLUDE);C.prefer_overlay_headers();C.prefer_overlay_headers()
