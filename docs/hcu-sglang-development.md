@@ -2786,3 +2786,27 @@ method 不匹配；`slimquant_marlin` 只认顶层 `int-quantized`，对该 chec
   `fused_experts_impl_w4a8_marlin` 中没有对应参数，marlin 路径不做 clamp；
   gsm8k 未见掉点，长输出与其他评测未验。
 - 未覆盖 MTP（`hunyuan_v4_nextn`）、DeepEP/EP、prefill graph、PD。
+
+## 2026-11-11 DeepEP clean_buffer 显式传递 top-k
+
+本次基线为 `9543829be6177e4261a2a3902fb6762e5602b881`，起始工作区干净。
+`hcu_sglang/layers/moe/deepep_current.py` 的 `DeepEPBuffer.clean_buffer`
+向 `clean_low_latency_buffer` 增加 `num_topk=state.num_topk`。
+按仓库约定补充本记录并重建离线导览。
+
+在用户指定的 `yangyn_sglang_plugin_1022` 容器（Python 3.10.12，已安装
+SGLang `0.5.18+dtk2604.torch2110.2610211227.g414c32`）运行：
+
+- `python3 ci/l0_gate.py`：通过，检查 697 个 Python 文件、8 个 Skill。
+- `python3 -m unittest discover -s tests -v`：运行 218 项，报告 11 处失败、
+  13 项跳过。失败包括 CLI 的 `field_names` 导入、quant_ops 来源哈希、
+  DSA Indexer AST 哈希及 slimquant_w4a8_marlin AST 哈希不一致；本次未修改这些模块或合同。
+- `PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" python3 tests/runtime/deepep_current.py -v`：4/4 通过。
+- 同样设置 PYTHONPATH 运行 `tests/runtime/deepep_graph_cpu.py -v`：
+  `setUpClass` 因已安装 SGLang 缺少 `arg_utils.is_record` 报 ImportError，0 项执行。
+- 提取本次实际 `clean_buffer` 方法进行调用检查：低延迟分支准确传递
+  `(128, 7168, 256, num_topk=8)`，非低延迟分支不调用清理方法，通过。
+
+日志位于 ignored 目录 `artifacts/clean-buffer-num-topk-20261111/`。
+以上是 CPU/接口检查，未验证 GPU 通信内核、真实模型生成或多卡 Graph。
+远端托管 Quality Gate 未触发，本次执行本地 CI 配方。

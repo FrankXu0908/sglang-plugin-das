@@ -644,6 +644,7 @@ class DeepEPBuffer:
             state.num_max_dispatch_tokens_per_rank,
             state.hidden_size,
             state.num_experts,
+            num_topk=state.num_topk,
         )
 
     @classmethod
