@@ -1678,5 +1678,57 @@
       "tests/runtime/rust_events_native.py"
     ],
     "validation_scope": "Owned source data and actual CPU Rust binding/Source C++/hashlib oracle; raw tuple ABI and event parity with Source Python recorder. Cargo suite separately recorded. Rust GPU/L3/model/retention and remaining Python adapter changes pending."
+  },
+  "python/sglang/multimodal_gen/runtime/loader/utils.py": {
+    "implementation": [
+      "hcu_sglang/multimodal_gen/loader/utils.py"
+    ],
+    "rationale": "流式 iterator 已由插件独立维护，插件生产消费者已接入；DAS 旧定义及其旧 import 已删除。其他 utils 属性按安装版本委托原生模块。整个文件仍有非本轮差异，不能据此声明全文件等价。",
+    "review_reason": "官方已有接口复用；非官方流式 iterator 归插件，消费者由插件加载边界接管。",
+    "status": "in_progress",
+    "tests": [
+      "tests/runtime/multimodal_loader_utils.py",
+      "tests/runtime/streaming_loader_integration.py"
+    ],
+    "validation_scope": "CPU 张量与官方转换对照；不代表完整流式加载、Hook 生效或 Wan2.2 服务已验证。",
+    "evidence": [
+      "plans/streaming-loader-utils-source.json",
+      "docs/hcu-sglang-development.md"
+    ]
+  },
+  "python/sglang/multimodal_gen/runtime/loader/fsdp_load.py": {
+    "implementation": [
+      "hcu_sglang/multimodal_gen/loader/fsdp_load.py",
+      "hcu_sglang/multimodal_gen/loader/integration.py"
+    ],
+    "rationale": "流式装载函数及必要依赖在插件维护；在 TransformerLoader 与 full-state 消费点以两个 AROUND Hook 接入，优先保留原生 rank-local、mapping、direct-device、host-spill 和 bitsandbytes 路线。DAS 的扩展参数、流式分支、旧装载函数及专用冗余 helper 已删除；普通加载路径的其他 DAS 差异保留。",
+    "review_reason": "DAS 新增流式装载机制归 plugin；非本次范围的普通加载与初始化策略保持原样。",
+    "status": "in_progress",
+    "tests": [
+      "tests/runtime/streaming_state_dict.py",
+      "tests/runtime/streaming_state_dict_distributed_cpu.py",
+      "tests/runtime/streaming_loader_integration.py"
+    ],
+    "validation_scope": "官方 v0.5.22 基线组合 37 项 CPU 测试及当前 DAS 11 项接线回归通过；真实 Wan2.2 单卡六组件加载完成，text encoder 上卡时显存不足导致预热失败。原接口错误未重现；HCU 多卡流式路径与整文件其他差异仍待验。",
+    "evidence": [
+      "plans/streaming-state-dict-source.json",
+      "docs/hcu-sglang-development.md"
+    ]
+  },
+  "python/sglang/multimodal_gen/runtime/loader/component_loaders/transformer_loader.py": {
+    "implementation": [
+      "hcu_sglang/multimodal_gen/loader/integration.py"
+    ],
+    "rationale": "TP/SP 流式选择条件已迁入插件；DAS 原 selector 和额外 streaming_state_dict_load 传参删除，官方中间方法签名保持不变。该文件其他模型和量化扩展不在本轮迁移范围。",
+    "review_reason": "按现有 TransformerLoader 加载边界接入，作用域按真实模型类限定并在异常和嵌套调用后恢复。",
+    "status": "in_progress",
+    "tests": [
+      "tests/runtime/streaming_loader_integration.py"
+    ],
+    "validation_scope": "真实 HookRegistry apply、公共 loader 物化、启停/回退/别名/异常状态 CPU 回归；HCU 多卡完整性能与数值待验。",
+    "evidence": [
+      "plans/streaming-loader-integration.json",
+      "docs/hcu-sglang-development.md"
+    ]
   }
 }

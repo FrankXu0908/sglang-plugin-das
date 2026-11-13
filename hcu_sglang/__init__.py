@@ -19,6 +19,10 @@ def register() -> None:
 
     register_envs()
 
+    from hcu_sglang.multimodal_gen.loader import integration as streaming_loader
+
+    streaming_loader.register_hooks()
+
     from hcu_sglang import (
         batch_overlap,
         configs,

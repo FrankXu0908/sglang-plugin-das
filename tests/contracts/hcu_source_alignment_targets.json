@@ -88,6 +88,8 @@
     "sglang.multimodal_gen.runtime.layers.attention.backends.aiter.AITerImpl.forward_varlen",
     "sglang.multimodal_gen.runtime.layers.attention.turbo_layer.MinimalA2AAttnOp.__init__",
     "sglang.multimodal_gen.runtime.layers.attention.turbo_layer.MinimalA2AAttnOp.forward",
+    "sglang.multimodal_gen.runtime.loader.component_loaders.transformer_loader.TransformerLoader.load_state_dict_model",
+    "sglang.multimodal_gen.runtime.loader.fsdp_load.load_model_from_full_model_state_dict",
     "sglang.multimodal_gen.runtime.models.dits.ltx_2.LTX2Attention.forward",
     "sglang.multimodal_gen.runtime.models.dits.minimax_h3.MiniMaxH3DiTModel.post_load_weights",
     "sglang.multimodal_gen.runtime.models.dits.minimax_h3._apply_qk_norm",

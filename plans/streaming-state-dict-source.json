@@ -1,0 +1,33 @@
+{
+  "source_repo": "HYGON-AI/sglang-das",
+  "source_commit": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+  "source_path": "python/sglang/multimodal_gen/runtime/loader/fsdp_load.py",
+  "source_file_sha256": "49f718b41fa25d5fea110a0c122dec36284d442cebbc3188385a3c585f019eae",
+  "owned_path": "hcu_sglang/multimodal_gen/loader/fsdp_load.py",
+  "symbols": {
+    "_resolve_missing_param_init": "ae60ca6ad5d757af34a787b7c5ae27a3c718400a124926bea6ff947b13692c54",
+    "load_model_from_streaming_state_dict": "10e886825d2e5c10f2604d7bee9eabf6559b35dd9540376a63705239373ea85a"
+  },
+  "source_functions_ast_unchanged": true,
+  "owned_iterator": "hcu_sglang.multimodal_gen.loader.utils.iter_hf_to_custom_state_dict",
+  "upstream_reuse": [
+    "_DTYPE_MISMATCH_EXAMPLE_LIMIT",
+    "_format_dtype_mismatch_summary",
+    "_make_param_like",
+    "_maybe_dequantize_fp8",
+    "rank_local_checkpoint.QUANTIZED_DTYPES",
+    "rank_local_checkpoint.get_param_for_weight_loading"
+  ],
+  "resolver_policy": "Use installed upstream _resolve_missing_param_init if present, otherwise preserve the extracted DAS resolver and its local_attn.proj_l. zero-init policy.",
+  "param_resolver_difference": "Reuse the upstream public rank-local helper; it reads concrete nn.Module/Parameter dictionaries, whereas the historical private DAS helper used getattr. No support claim for synthetic attribute-only objects.",
+  "stage": "production-hook-chain-linked-legacy-das-streaming-branch-removed",
+  "legacy_streaming_definition_removed": true,
+  "parent_policy": "hcu_sglang.multimodal_gen.loader.integration",
+  "native_precedence": [
+    "rank-local checkpoint already materialized",
+    "checkpoint mapping retention",
+    "direct-device full-state loading",
+    "host-spill materialization",
+    "bitsandbytes checkpoint handling"
+  ]
+}

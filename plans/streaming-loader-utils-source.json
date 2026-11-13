@@ -1,0 +1,16 @@
+{
+  "source_repo": "HYGON-AI/sglang-das",
+  "source_commit": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+  "source_path": "python/sglang/multimodal_gen/runtime/loader/utils.py",
+  "source_symbol": "iter_hf_to_custom_state_dict",
+  "source_file_sha256": "0c344a2a02608331974cd49401c03601831d33e363741ef3f0939b62cf5b0b8d",
+  "owned_path": "hcu_sglang/multimodal_gen/loader/utils.py",
+  "symbol_ast_sha256": "68fbeff9f89af3a6869bd516c0997bee466fe3acb3fc781d749c27a8a1ab8040",
+  "source_ast_unchanged": true,
+  "stage": "production-hook-chain-linked-legacy-das-iterator-removed",
+  "upstream_policy": "Unowned names delegate to the installed official module and retain object identity; absent names raise AttributeError.",
+  "owned_consumers": [
+    "hcu_sglang.multimodal_gen.loader.fsdp_load.load_model_from_streaming_state_dict"
+  ],
+  "legacy_source_definition_removed": true
+}

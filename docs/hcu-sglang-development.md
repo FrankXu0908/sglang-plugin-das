@@ -2231,3 +2231,166 @@ GenerationBatchResult 有此可选字段。插件在读取时处理缺省，保�
 Berlin、Tokyo、LANTERN-8306、12，均为 stop。请求后健康检查 HTTP 200。
 官方仓库与验证副本的 10,592 个 tracked 文件哈希一致。此结果覆盖本次短问答；
 原始 JSON 和服务日志在验证目录 logs/nmz107/attempt-8。两项修复均位于 plugin。
+
+
+## 2026-11-12 扩散加载 utils 接口分阶段迁移
+
+本轮按用户要求从 `utils.py` 开始逐接口迁移，不改动其他加载策略。
+来源为 DAS `15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e`；本地官方
+基线为 v0.5.22 `baa9befa381511cd4d56f83980951e5a45fffc6d`。另核对
+官方最新稳定版 v0.5.23 `297e54fd105e974cdf401e5b4d20253a22c16f90` 与
+main `c7f3e2bdfd348d396f17f776f067f5765fa2bc52`，均无 DAS 的
+`iter_hf_to_custom_state_dict` 和流式 state-dict 分支。
+
+实现位于 `hcu_sglang/multimodal_gen/loader/utils.py`：
+
+- `iter_hf_to_custom_state_dict` 按来源函数完整 AST 原样迁入，保留来源许可、
+  注释与 docstring，不在本次改变映射、合并、重复键或不完整分片语义。
+- 其他接口按名称转交已安装的 SGLang `runtime.loader.utils`，返回原函数对象，
+  包括私有辅助接口；不复制一份官方实现，不改写官方模块。
+- 官方不存在的属性继续报 `AttributeError`。`_resolve_missing_param_init`
+  属于后续 `fsdp_load.py` 接口范围，本轮不新增或伪造。
+- `load_safetensors_state_dict` 在本地官方 v0.5.22 存在，但最新 v0.5.23
+  和 main 均已没有该接口。插件按已安装版本暴露存在的接口；部署版本缺少
+  它时继续报属性缺失，不从其他仓库加载或补造旧实现。
+
+来源和 AST 哈希见 `plans/streaming-loader-utils-source.json`。功能回归位于
+`tests/runtime/multimodal_loader_utils.py`，覆盖真实 CPU 张量、惰性消费、乱序
+Q/K/V 合并、合法目标键回退、重复精度项透传，以及与官方全量转换的对照。
+
+本阶段为插件自有辅助接口就绪，未注册加载器 Hook，未切换现有 DAS
+`fsdp_load.py` 消费者。因此 DAS 旧 helper 暂保留，待消费者迁移后在同一步
+删除旧定义；此时删除会直接破坏现有 `from ...utils import ...`。不把本阶段
+记作整个流式功能已生效或 Wan2.2 启动已通过。
+
+验证：在现有容器的 Python 3.10 / PyTorch 2.11.0 环境，以
+`HCU_ADAPTER_HOST=none` 关闭设备桥初始化，并在 Python 启动后显式将官方
+`sglang/python` 放到搜索路径首位。实际 `utils.__file__` 确认为官方仓路径，
+运行 `tests/runtime/multimodal_loader_utils.py -v`：10/10 通过。
+这是 CPU/接口验证；没有启动模型、启用完整流式加载或执行 GPU 推理。
+另外将已固定提交的 v0.5.23 和 main 的 `utils.py` 源文件分别装入同一
+CPU 依赖环境，按其真实属性存在性重复同一组测试，各 10/10 通过，共 30 项。
+这不等于安装并验证了两个完整新版 SGLang 环境。跨版本检查中首先发现测试
+错误地要求每个版本都提供旧 checkpoint 接口，已改为同时验证“存在则同对象、
+不存在则属性缺失”，未给实现增加伪造接口或兼容副本。
+
+`ci/l0_gate.py` 通过；迁移执行台账、运行时 closure 与离线导览均已重建并
+通过 freshness 检查，`git diff --check` 通过。手工决策只变更 utils 一项；
+生成执行台账还刷新了仓库中此前已变更但未同步至生成快照的其他决策，
+不代表本次新增了其他模块的迁移或验证。
+
+
+## 2026-11-12 流式 state-dict 装载函数迁移
+
+接续 utils 接口阶段，在同一聚焦分支迁移 DAS
+`runtime/loader/fsdp_load.py:load_model_from_streaming_state_dict` 至
+`hcu_sglang/multimodal_gen/loader/fsdp_load.py`。来源仍固定为
+`15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e`，来源函数及缺失参数 resolver
+的完整 AST 保持一致；来源许可、注释、docstring 保留。证据与有意依赖替换见
+`plans/streaming-state-dict-source.json`。
+
+接口与依赖：
+
+- 新装载函数直接使用已迁入插件的 `iter_hf_to_custom_state_dict`，不从 DAS
+  源目录动态加载任何实现，不复制官方完整 fsdp 模块。
+- 官方 `_make_param_like`、`_maybe_dequantize_fp8`、dtype 日志格式化，以及
+  `rank_local_checkpoint.QUANTIZED_DTYPES` 直接复用。
+- 旧 DAS `_get_param_for_weight_loading` 以官方公开
+  `rank_local_checkpoint.get_param_for_weight_loading` 替代。官方 helper
+  读取真实 Module/Parameter 的字典；历史 DAS helper 使用 getattr。本轮覆盖
+  实际参数对象与 FSDP 包装前的 weight_loader 元数据，不为仅依赖动态属性的
+  人工对象声称兼容。
+- `_resolve_missing_param_init` 在安装版本提供同名接口时使用原对象；否则
+  使用原样迁入的 DAS helper，保留 `local_attn.proj_l.` 零初始化策略。该规则
+  不写回官方普通加载路径；后续普通路径的迁移单独处理。
+- 其他原生 fsdp 接口按名称暴露原对象，不修改其签名。
+
+CPU 回归 `tests/runtime/streaming_state_dict.py` 已执行 15/15 通过，覆盖
+真实 meta Linear 参数物化、插件 iterator 实际消费、官方全量加载结果对照、
+合并顺序、目标 dtype、参数专属 loader、FSDP 前元数据、缺失/多余键、量化
+重复项及 FP8 反量化。实际官方来源为本地 v0.5.22，Python 3.10、Torch 2.11.0，
+`HCU_ADAPTER_HOST=none`；未 mock 被验证的加载与参数装载边界。
+
+另以 `tests/runtime/streaming_state_dict_distributed_cpu.py` 验证两 rank
+Gloo/DTensor 的真实 Shard(0) 分片、CPU 放置和异常拒绝，1/1 通过。
+该 lane 不是 HCU FSDP/TP 或 GPU offload 性能验收。
+另在当前已安装 DAS 树运行同一 15 项 CPU 测试，15/15 通过，并断言插件
+resolver 与安装树已有 resolver 是同一对象。因此本轮同时覆盖官方基线的
+自有 resolver 分支和当前安装树的原接口复用分支。
+
+L0 通过（703 个 Python 文件）；执行台账、closure、导览重建及 freshness
+检查通过，`git diff --check` 通过。原官方仓和 DAS 仓均未修改。
+
+父 `maybe_load_fsdp_model` 的选择/接线还未迁移，因而本阶段不注册生产 Hook，
+不删除仍被旧父 loader 调用的 DAS 定义；后续切换父链路时一起删除旧生产者
+和旧 iterator。本阶段不修复原启动报错、不启动 Wan2.2 服务。
+
+
+## 2026-11-12 流式加载选择策略与生产接线迁移
+
+接续前两步，将 TP/SP 条件与加载选择迁入
+`hcu_sglang/multimodal_gen/loader/integration.py`，来源仍为 DAS
+`15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e`。接线与边界见
+`plans/streaming-loader-integration.json`。
+
+生产入口仍为既有 `hcu` entry point，不新增环境键、官方配置字段或函数参数。
+`TransformerLoader.load_state_dict_model` 的 AROUND Hook 从原有 server_args
+读取 TP/SP 条件，在单次加载作用域记录目标模型类；`full-state` 装载函数的
+AROUND Hook 仅对匹配类选择插件流式实现。状态使用 ContextVar，并以 finally
+恢复，避免跨模型、嵌套加载和异常后的状态泄漏。官方中间类及其方法签名不变。
+
+原生 rank-local 切片已经成功时继续使用原路径；checkpoint mapping、direct
+GPU weight loading、host spill 与 bitsandbytes 特殊处理也交回有效原函数，
+不丢弃其专属参数。选择插件流式时仍保留原函数外层的模型构造、FSDP 处理、
+post_load_weights、冻结和卸载生命周期，不复制 maybe_load_fsdp_model 整段。
+
+DAS 的清理范围只包含三处旧扩展：caller 的 selector/传参、底层参数/流式分支
+及旧装载函数、utils 的旧 iterator；流式专用私有参数解析副本和量化常量一并
+清理。其余普通加载与其他模型差异未动。对固定来源进行 AST 变换核验，三个
+文件均只包含计划中的移除，普通分支的初始化与后处理保持不变。
+
+新 Hook 在顶层 register 的早期登记，并纳入当前目标合同。当前安装树仍有
+既有的 SRT current_dsa 注册异常；本轮不吞掉这些错误，也不将局部 Hook 成功
+描述为全量插件合同通过。服务日志已确认 parent/worker 中两项新 Hook 实际
+apply，Wan attention_type=sla 与 sla_topk=0.25 已被识别。
+
+验证：`tests/runtime/streaming_loader_integration.py` 在当前 DAS 树 11/11
+通过。官方 v0.5.22 基线下，utils、装载函数、接线与两 rank CPU DTensor 的
+组合回归共 37/37 通过。覆盖插件启停、单卡原路径、TP/SP 选择、原生优化优先、
+缓存导入别名刷新、实际元权重物化及失败后恢复。TP/SP 条件单测不等于真实
+HCU 多卡验收；本轮未重新运行 HCU 多卡流式加载或性能测试。
+
+按用户配置进行真实 Wan2.2 单卡复测：DiT 常驻、text encoder/VAE CPU offload、
+SLA 0.25、720p 一步服务预热。原 unexpected keyword argument 已不再出现，
+六个组件全部加载完成，其中两组 DiT 各报告 26.62 GB，SLA 参数已识别。
+预热在 text_encoding 的组件上卡阶段 OOM：text encoder 的整组件 CPU offload
+在使用时仍会执行 module.to(device)，当时两个 DiT 常驻后可用显存只有
+7.25 GB，后续申请 192 MiB 失败；PyTorch allocated 60.90 GiB、reserved but
+unallocated 2.81 GiB。框架自动缩短帧数重试后仍失败，服务已自行退出。
+未发送额外生成请求，没有报告服务 ready 或生成通过。
+
+完整日志已归档于本次模型适配实验目录的 wan22-migrated 运行记录。
+新加载 Hook 在真实 parent/worker 中均已 apply，原 TypeError 与回退段错误
+没有重现。仍有此前的 SRT 适配警告，本轮未处理；不把单卡原路径验证外推成
+真实 HCU 多卡流式路径已验收。
+
+L0、导览与迁移台账 freshness、git diff --check 均通过。用户随后要求提供
+DiT 也 offload 的启动命令，该配置尚未执行，不能沿用本轮结果宣称已通过。
+
+
+### 2026-11-13：按 0.5.22 release 基线整理
+
+本次插件改动基于 `release/sglang_v0.5.22`（`9258cef`），只迁移流式加载
+实现、注册、四项测试模块及三项 loader 台账。保留 release 原有功能，
+不引入 main 的其他功能或全仓 runtime closure 工具与测试。配套 SGLang
+基于 `v0.5.22.plugin`（`15c7204b7a`），adapter 基于其
+`release/sglang_v0.5.22`（`766879b`）。此前 main 基线结果仅为历史证据，
+不外推为本次 release 的 GPU、模型、性能或全量门禁通过。
+
+本次 release 基线实际验证：四个 loader 模块共 37 项通过，覆盖
+CPU 张量与两 rank Gloo；上游导入探测需要设备可见，不是隐藏 GPU
+验证。L0、执行台账与导览快照检查通过。全量 unittest 候选与干净
+release 基线均为 132 项，1 failure、2 errors、13 skipped，失败/错误
+用例集合相同；两项错误为主机缺少 torch，一项为既有模拟 arg_utils
+缺少 field_names。未重跑真实模型、GPU Graph、多卡和性能验收；
+导览未执行浏览器渲染、交互及窄屏截图检查。

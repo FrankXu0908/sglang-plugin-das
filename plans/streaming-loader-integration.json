@@ -1,0 +1,37 @@
+{
+  "source_repo": "HYGON-AI/sglang-das",
+  "source_commit": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+  "owned_module": "hcu_sglang/multimodal_gen/loader/integration.py",
+  "source_cleanup": [
+    "python/sglang/multimodal_gen/runtime/loader/component_loaders/transformer_loader.py",
+    "python/sglang/multimodal_gen/runtime/loader/fsdp_load.py",
+    "python/sglang/multimodal_gen/runtime/loader/utils.py"
+  ],
+  "targets": [
+    "sglang.multimodal_gen.runtime.loader.component_loaders.transformer_loader.TransformerLoader.load_state_dict_model",
+    "sglang.multimodal_gen.runtime.loader.fsdp_load.load_model_from_full_model_state_dict"
+  ],
+  "hook_type": "AROUND",
+  "activation": "Existing hcu entry point; existing TP/SP fields select per-load behavior. No new environment key or official signature parameter.",
+  "native_precedence": [
+    "preconverted_state_dict",
+    "keep_checkpoint_mapping",
+    "allow_device_tensor_assignment",
+    "host_spill",
+    "bitsandbytes"
+  ],
+  "module_aliases": "Use the official HookRegistry propagation for pre-imported function aliases.",
+  "context_scope": "ContextVar bound to the concrete model class for one TransformerLoader operation; reset in finally.",
+  "verification": {
+    "official_cpu_suite": 37,
+    "installed_tree_integration_suite": 11,
+    "gpu_single_card": {
+      "weight_loading": "all six components completed",
+      "warmup": "failed with GPU OOM while moving text_encoder to device",
+      "original_keyword_error": "absent",
+      "DiT_offload": false,
+      "service_running": false
+    },
+    "gpu_multi_card_streaming": "not_run"
+  }
+}
