@@ -594,6 +594,7 @@ def fused_experts_impl_w4a8_triton(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     routed_scaling_factor: float,
+    swiglu_limit: Optional[float] = None,
     num_local_tokens: Optional[torch.Tensor] = None,
     shared_output: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -697,6 +698,7 @@ def fused_experts_impl_w4a8_triton(
             activation == "silu"
             and fuse_silu_mul_per_token_quant is not None
             and W4A8_TPMOE_FUSED_ACT_QUANT
+            and swiglu_limit is None
         ):
             qactivated, activated_scale = fuse_silu_mul_per_token_quant(
                 cache1.view(token_count * top_k, n1), dtype=torch.int8
@@ -704,6 +706,9 @@ def fused_experts_impl_w4a8_triton(
         if qactivated is None:
             gate, up = cache1.chunk(2, dim=-1)
             if activation == "silu":
+                if swiglu_limit is not None:
+                    gate = gate.clamp(max=swiglu_limit)
+                    up = up.clamp(min=-swiglu_limit, max=swiglu_limit)
                 activated = F.silu(gate) * up
             elif activation == "gelu":
                 activated = F.gelu(gate) * up
@@ -1641,6 +1646,7 @@ class SlimQuantW4A8Int8TritonMoEMethod:
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             routed_scaling_factor=routed_scaling_factor,
+            swiglu_limit=self.moe_runner_config.swiglu_limit,
             shared_output=shared_output,
         )
 
@@ -1755,6 +1761,7 @@ class SlimQuantW4A8Int8TritonMoEMethod:
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             routed_scaling_factor=float(routed_scaling_factor),
+            swiglu_limit=self.moe_runner_config.swiglu_limit,
             num_local_tokens=num_local_tokens,
             shared_output=None,
         )

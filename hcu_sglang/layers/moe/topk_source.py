@@ -1937,7 +1937,8 @@ def _mask_topk_ids_padded_region(
     if num_token_non_padded is None:
         return
     # TODO: let the kernel support other dtypes
-    if _is_cuda and topk_ids.dtype == torch.int32 and fill_value == -1:
+    use_cuda_mask = _is_cuda and not (_is_hcu and num_token_non_padded.is_cuda)
+    if use_cuda_mask and topk_ids.dtype == torch.int32 and fill_value == -1:
         mask_topk_ids(topk_ids, num_token_non_padded)
     elif _is_npu:
         return

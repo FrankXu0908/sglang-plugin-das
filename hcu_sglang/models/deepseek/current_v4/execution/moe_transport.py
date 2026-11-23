@@ -8,6 +8,7 @@ from contextlib import contextmanager, nullcontext
 import torch
 
 from sglang.srt.environ import envs
+from sglang.srt.layers.attention.dsa.utils import dsa_use_prefill_cp
 from sglang.srt.layers.cp.interleave import attn_cp_interleave_gather
 from sglang.srt.layers.cp.utils import is_cp_active
 from sglang.srt.layers.dp_attention import (
@@ -31,6 +32,7 @@ from sglang.srt.layers.dp_attention import (
 from sglang.srt.layers.layer_boundary.ops import attn_cp_interleave_reduce_scatter
 from sglang.srt.layers.layer_boundary.output import DeferredFinalize
 from hcu_sglang.models.deepseek.current_v4.execution.row_transport import ComputeTransport
+from hcu_sglang.utils.detection import is_hcu
 from sglang.srt.layers.moe import get_moe_a2a_backend, should_use_dp_reduce_scatterv
 from sglang.srt.runtime_context import get_forward, get_parallel
 from sglang.srt.utils import get_bool_env_var, is_hip
@@ -114,7 +116,14 @@ class MoeRowTransport(ComputeTransport):
         moe_gather=None,
         attn_scatter=None,
     ):
-        _use_cp = is_cp_active(forward_batch) if use_cp is None else use_cp
+        if use_cp is None:
+            # Legacy HCU CP does not install the upstream CP strategy.
+            use_cp = (
+                dsa_use_prefill_cp(forward_batch)
+                if is_hcu()
+                else is_cp_active(forward_batch)
+            )
+        _use_cp = use_cp
         _use_tp_moe_gather = (
             moe_gather
             if moe_gather is not None

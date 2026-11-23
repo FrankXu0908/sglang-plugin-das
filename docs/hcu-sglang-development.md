@@ -25,6 +25,9 @@
 - [2026-11-19：GLM-5.3 FP8 稳态 prefill 优化](#2026-11-19-glm-53-fp8-稳态-prefill-优化)
 - [2026-11-20：gfx938 Qwen attention 门控与 FP8 量化融合](#2026-11-20-gfx938-qwen-attention-门控与-fp8-量化融合)
 - [2026-11-20：gfx938 Qwen GDN 门控归一化与 FP8 量化融合](#2026-11-20-gfx938-qwen-gdn-门控归一化与-fp8-量化融合)
+- [2026-11-19：DeepSeek-V4 TopK v2 JIT](#2026-11-19-deepseek-v4-topk-v2-jit)
+- [2026-11-19：DeepSeek-V4 compression JIT](#2026-11-19-deepseek-v4-compression-jit)
+- [2026-11-20：DeepSeek-V4 PD transfer import](#2026-11-20-deepseek-v4-pd-transfer-import)
 - [2026-11-20：Qwen-Image 2.1 四卡 Ulysses 直收](#2026-11-20-qwen-image-21-四卡-ulysses-直收)
 - [2026-11-20：MoriDAS Masked INT8 GEMM 写入契约](#2026-11-20-moridas-masked-int8-gemm-写入契约)
 - [2026-11-23：Qwen-Image 2.1 Ulysses 直收 PR 同步](#2026-11-23-qwen-image-21-ulysses-直收-pr-同步)
@@ -1475,6 +1478,143 @@ L0、三个定向测试、导览生成和 `git diff --check` 通过。完整 uni
 优先使用 [LightOP PR #183](https://github.com/HYGON-AI/lightop/pull/183) 的接口。旧版 wheel 使用 plugin 携带的同一 gfx938 Triton 实现。已发起 kernel 的错误沿原调用链上报。
 
 以 plugin release `c47683ec` 和 SGLang v0.5.22 `baa9befa` 为基线。CPU 合同覆盖开关、设备和量化方案准入、provider 选择、prefill/decode/target verify 的 FP8 数据直通及 TP2 reduction。gfx938 kernel 可离线编译。nmz26 满卡，模型规模的 gfx938 数值、Graph 重放和性能待验证。
+## 2026-11-19 DeepSeek-V4 TopK v2 JIT
+
+在 SGLang `baa9befa38`、adapter-das `bcec3e0`、plugin `708a332` 的组合中，
+全局 `SGLANG_HCU_JIT_OVERLAY` 关闭时，插件的 TopK v2 包装器使用社区头文件。
+该头文件未提供包装器导出的 `transform_kpool` 与 `transform_kpool_ragged`，
+首次 prefill 在编译 `sgl_kernel_jit_dpsk_v4_topk_v2_false` 时失败。
+
+`hcu_backend/topk.py` 将 TopK v2 的编译调用接到已有 overlay loader，
+仅为该模块选用插件自带 `topk_v2.cuh` 和对应 include 路径。全局 overlay 仍为关闭。
+保留 adapter 对社区编译输入的处理，以及插件原始导出符号和 TopK 数学实现。
+
+`tests/runtime/dsv4_topk_jit_contract.py` 验证全局 overlay 关闭时实际 BuildSpec
+选择的源文件、导出符号和编译头文件顺序。在 DTK 2610 / gfx936 上，
+`hipcc` 冷编译成功并加载 `.so`，验证两个 KPool 导出可用且 `plan_topk_v2`
+实际在 HCU 上返回 `int32` 元数据。Paged、KPool、ragged KPool 在长度
+`[0, 3, 901]`、`k=512` 下的索引集合与 `-1` 填充均通过 PyTorch 参考对照。
+
+原 TP8/DP8/EP8 + DSpark 配置启动后，`/v1/models` 返回 200。
+`client_curl.sh` 的首个 prefill 越过 TopK，随后 `compress_plan_out_rocm_v2`
+因社区 `c_plan.cuh` 缺少 `plan_compress_prefill_out` 和
+`plan_compress_decode_out` 编译失败，因此未完成端到端生成。
+本轮第 7 张卡可用显存偏少，KV cache 容量缩小。未验证容量、性能或 Graph 模式。
+保存此次服务日志后清理测试进程。
+
+## 2026-11-19 DeepSeek-V4 compression JIT
+
+复跑同一 INT4 + DSpark 配置时，首个 prefill 的 `compress_plan_out_rocm_v2`
+使用社区 `c_plan.cuh`，缺少插件包装器的两个 `*_out` 导出。
+`FusedNormRopeKernel` 也有类似差异，社区模板缺少插件调用的 `kInt8Store` 参数。
+插件 `hcu_backend/compress.py` 的这两个模块分别选用自带编译输入与配套头文件。
+全局 overlay 默认关闭，其他压缩 JIT 模块继续使用社区来源。
+
+实际 BuildSpec 回归通过。DTK 2610 / gfx936 冷编译并加载 compression plan，
+`CompressorPrefillPlan.generate` 与 `CompressorDecodePlan.generate` 在 HCU 上执行通过。
+原配置的 INT8 indexer 使用 `HCU_DSA_PRESHUFFLE=0`，与内核的 unshuffled 布局相符。
+
+此前 8 个 Uvicorn tokenizer worker 启动期间，每约 10 秒出现一次退出重拉。
+本次服务对照在启动环境将 `SGLANG_UVICORN_WORKER_HEALTHCHECK_TIMEOUT` 设为 120 秒，
+保留 8 个 worker 与原模型参数。对照中 8 个 worker 在约 95 秒内全部就绪，
+起服阶段无退出重拉。原启动脚本据此增加 120 秒环境设置。
+
+实际请求通过压缩 plan 后暴露 C4 BF16 indexer 的同类问题。插件
+`hcu_backend/elementwise.py` 的 BF16 indexer JIT 改用自带 `main_norm_rope.cuh`，
+该模板支持 `kQuantize=false`。gfx936 冷编译成功，恒等 RoPE 输入的 BF16
+Hadamard 输出和 FP32 权重已在 HCU 上对照参考结果。
+
+后续运行中 MoE padding mask 选中社区 CUDA JIT，拒绝实际为 ROCm 的
+`num_token_non_padded`。旧 `sglang-das` 在该边界处使用 HIP 后处理。
+`hcu_sglang/layers/moe/topk_source.py` 对 HCU 设备侧计数走已有 Triton 行填充，
+保留 CPU 计数的原调用路径。gfx936 上验证设备计数为 0、部分有效及全部有效，
+并确认 CPU 计数路径输出正确。
+
+`plugin.compress-20261119-210350.log` 记录原 TP8/DP8/EP8 + DSpark 配置的终验。
+8 个 tokenizer worker 就绪，没有重拉。原 `client_curl.sh` 完成 prefill 和 decode，
+`POST /v1/chat/completions` 返回 HTTP 200 与有效生成响应。保留验证服务运行。
+
+## 2026-11-20 DeepSeek-V4 PD transfer import
+
+在 SGLang `baa9befa38`、adapter-das `bcec3e0`、plugin `708a332` 的组合中，
+0731 INT4 + DSpark 的 P、D scheduler 在初始化 DeepSeek-V4 KV manager 时，
+从社区 `sglang.srt.mem_cache.cp_cache_layer_split` 导入插件的传输配置，导致
+`ModuleNotFoundError`。失败证据见服务日志 `prefill-20261120-092510.log` 和
+`decode-20261120-092510.log`。
+
+`hcu_sglang/disagg/prefill.py` 和 `hcu_sglang/disagg/decode.py` 改为从
+`hcu_sglang.mem_cache.cp_cache_layer_split.transfer` 导入 `configure_v4_transfer`。
+验证日志 `prefill-20261120-093223.log` 和 `decode-20261120-093223.log` 显示，
+P（TP8/CP8）与 D（TP8/DP8/EP8）均完成启动，`GET /v1/models` 返回 HTTP 200。
+该轮首个聊天请求在 P 侧遇到 W4A8 MoE runner 参数不兼容，端到端生成与性能
+仍待验证。
+
+### CP 全局 token 顺序
+
+服务日志 `prefill-20261120-123013.log` 显示，P（TP8/CP8，interleave）处理请求时，
+attention 在 `cp_materialize_global_token_order` 的 HCU 旧版 CP 分支调用了社区
+`sglang.srt.layers.utils.cp_utils.cp_all_gather_rerange_output`。该入口无条件抛出
+`ValueError: Prefill CP on NPU/MUSA is deprecated; CP support will be refactored soon.`，
+使 P 的 CP rank 退出。
+
+`hcu_sglang/cp_runtime.py` 改为调用插件已有的 `hcu_cp_utils.cp_all_gather_rerange_output`。
+该实现先在 attention CP 组执行 all-gather，再按 CP 元数据恢复全局 token 顺序。
+CP-v2 继续通过策略对象调用 `gather_kv_cache`。修复后的 PD 请求验证仍待完成。
+
+### CP 与 MoE 路由行顺序
+
+服务日志 `prefill-20261120-170345.log` 显示，P（TP8/CP8，interleave）处理请求时，
+`hash_topk_source.py` 收到 24 个 `input_ids`，而 `hidden_states` 和 `router_logits`
+各只有 3 行。模型主体已按 HCU 旧版 CP 对 hidden states 分片，但 `MoeRowTransport`
+用社区策略 CP 判定检查该批次，跳过了 MoE 前的 attention CP all-gather。
+
+`hcu_sglang/models/deepseek/current_v4/execution/moe_transport.py` 改用与模型主体一致的
+HCU `dsa_use_prefill_cp` 判定。`moe-a2a-backend=none` 时，attention CP all-gather 按 rank
+顺序收齐 hidden rows，与 `cp_round_robin_input_ids` 生成的 token ID 顺序对齐。各 TP rank
+计算本地专家权重分片后，reduce-scatter 把合并结果送回各 CP rank。修复后的 PD 端到端请求仍待验证。
+
+### W4A8 Triton SwiGLU 限幅
+
+`client-20261120-172504.json` 所对应的 PD 聊天请求返回 HTTP 200，但模型生成内容异常。
+0731 INT4 模型配置包含 `swiglu_limit=10.0`，当时 P 的 LightOp Triton W4A8 路径在
+gate/up GEMM 后直接执行 `SiLU(gate) * up`，遗漏了配置中的限幅。
+
+`hcu_sglang/layers/quantization/slimquant_w4a8_marlin.py` 让标准 TP 和 EP 入口将
+`MoeRunnerConfig.swiglu_limit` 传给同一个 Triton W4A8 执行函数。它在 SiLU 前限制
+gate 的上界，并把 up 限制在正负阈值之间，再按原路径做逐 token INT8 量化和 down GEMM。
+合入发布分支时，将该修复与已有的可选激活量化融合合并。当前 INT8 融合接口不支持限幅，
+因此只有模型未配置 `swiglu_limit` 时才使用融合分支。配置限幅时先按模型阈值做限幅，
+再使用逐 token INT8 量化。
+
+### Torch MLA 掩码与 KV 填充行
+
+n19 Prefill 使用 Torch MLA 路径。2026-11-20 17:27:25 向 P 端直接发送同一
+19 token 请求并使用 fake bootstrap，首 token 为 BOS，前五个 logprob 均为
+−11.769735，与 129280 词表上的均匀分布一致。该请求执行正常的模型前向和采样，
+通过本地 fake sender 跳过 P/D KV 传输。
+
+`hcu_sglang/layers/attention/debug_flash_mla_adapter.py` 在共享 tile 累积函数中将
+无效 KV 行的 NoPE 和 RoPE 向量置零。负索引解包时取 slot 0，超过 top-k
+长度的行也可能读取已分配但未写入的缓存。只屏蔽注意力权重时，后续加权和仍会计算
+`0 * NaN`，使该查询的输出传播 NaN。
+
+在 DTK2610 部署容器内使用 CPU Torch，对照 plugin `708a332` 与本次修改。
+两种 FP8 dtype 均覆盖负索引、超过 top-k 长度的正索引、全掩码 tile 与附加 KV
+缓存。污染用例原输出 512 个分量均为 NaN，修改后逐值等于有限参考，有限基线一致。
+本记录覆盖该算子级反例。
+
+### 1P1D 请求复验范围
+
+2026-11-21，Torch MLA 配置的两条 1P1D 冒烟请求分别生成 `5` 和 `1,2,…,20`，
+均正常停止。该配置的 MoE A2A 为 `none`，P 的主 runner 为 AITER，D 的主 runner
+为 Triton，两侧 draft runner 均为 Triton。证据为 `client-20261121-101049.json`
+和 `client-draft-kv-20261121-101131.json`。
+
+2026-11-22 改用 DeepEP + DeepGEMM 后，Router 请求在 Prefill 退出后返回 HTTP 503。
+原生 FlashMLA 在调度元数据 kernel 启动时报 `no kernel image`。切换 Torch MLA 后，
+请求进到 W4A8 contiguous HIPC WASP，HIP 启动返回 209。单卡对照中 gfx936 Code
+Object V5 可执行，V6 无法解析 kernel 符号。该版本组合的 DeepEP + DeepGEMM
+端到端生成仍待验证。
 
 ## 附录：布局、操作方式与汇总
 
@@ -2971,7 +3111,7 @@ Berlin、Tokyo、LANTERN-8306、12，均为 stop。请求后健康检查 HTTP 20
 
 同时把 `handle_bootstrap_failure` 中不再使用的 `cleanup_done` 局部变量删除，避免未使用变量告警。
 
-**实际验证（本机，Windows / Python 3.14，无 torch、无 sglang、无 DCU）**：
+**实际验证（本机，Windows / Python 3.14，无 torch、无 sglang、无 HCU）**：
 
 - `python -m py_compile hcu_sglang/disagg/prefill.py` 通过。
 - 新增 `tests/test_pd_prefill_inflight_consensus.py`，9 项 AST 结构契约全部通过：导入来源、TP/CP 两次汇总、汇总位置在 poll 循环之后、done 集合由汇总结果重建、已回包请求提前出队、两处入队不依赖 `cleanup_done`、假 sender abort 在入队之前、告警限频。
@@ -3888,7 +4028,7 @@ Channel FP8 prefill worker 在启动时编译或加载节点缓存。各 rank
 通过文件锁和原子发布共享产物。K1 仍按模型结构、量化方式和张量布局选择，
 加载扩展时检查 ABI 和导出入口。配置见 [K1 indirect-A](configuration.md#8-glm-53-fp8-prefill-的-k1-indirect-a-候选)。
 本地用替代编译进程核对八进程并发只生成一份产物、热启动复用、
-Python 或 DTK 变化后重新构建，以及编译失败后可重试。DCU 上的实际
+Python 或 DTK 变化后重新构建，以及编译失败后可重试。HCU 上的实际
 编译、服务启动和 K1 命中待验证。
 HCU dcp=1 在 FlashMLA KV 分发前使用匹配 page table 的有效 top-k 行，
 保留隔离试验带入的 padding 行裁剪逻辑。
@@ -3919,7 +4059,7 @@ HCU DSA FP8 KV 池把 Graph 的占位槽放在最后一个可分配页之后。
 在个人 fork 的 `6d8ad63` 基线上，本地复现了小 batch 写到最后一个
 可分配页以及普通 decode batch 128 触发容量断言。修复后用 CPU 桩
 执行池分配和槽号转换，覆盖普通 decode、EAGLE、prefill bucket、
-eager 和 DCP=1。DCU 上的服务、换输入 Graph replay、调用对齐、
+eager 和 DCP=1。HCU 上的服务、换输入 Graph replay、调用对齐、
 性能和端到端精度待验证。
 
 DCP4 验收配方使用 FP8 KV、64 token 页、`ag_rs` 和双阶段 `flashmla_kv`。
@@ -3991,7 +4131,7 @@ GLM-5.3 的 PD Decode 在 overlap 模式下可能先提交下一轮 forward，�
 GLM-5.3 的 PP1 Prefill CP LayerSplit 单层 MTP 配方中，draft Main-KV 的 L2 备份和
 回载只在该层 owner 上执行。设备索引仍是 target 模型层数之后的 packed draft 索引，
 host 索引使用本 rank 的 target host 层数之后的槽位。Index-K 沿用已有的 owner 过滤。
-本轮只做本地 lint、语法和结构检查，DCU 上的搬运、重叠调度及端到端精度待验证。
+本轮只做本地 lint、语法和结构检查，HCU 上的搬运、重叠调度及端到端精度待验证。
 
 发布分支冒烟发现 v0.5.22 同时传入 AFTER hook 的位置返回值和宿主 `result=` 参数。
 Decode hook 将处理后的输出作为仅限位置参数接收，避免与宿主关键字冲突。
@@ -4302,6 +4442,12 @@ GEMM 由 DeepGEMM 执行。算子声明 `output` 可写，真实实现和 fake �
 的组件探针在 `aot_eager` 和 Inductor 下均与 eager 逐元素一致，且 Combine 入口收到
 调用方提供的原始 GEMM2 输出地址。普通 CUDA Graph 更换输入重放两次也通过。真实双节点
 RDMA 与注册通信缓冲区仍待服务验证。
+
+## GLM-5.3 W4A8 HiSparse PD Decode 容量
+
+对齐框架 [#70](https://github.com/maxiaobetter/sglang-das/pull/70) 的 Channel W4A8、FP8 KV、DCP=1 配置。目标 Index-K 与逻辑分配器按完整页取整，MTP draft 从分配器读取相同的地址空间。PD Decode worker 用逻辑池容量计算请求上限，设备热池仍按物理容量分配。发布基线的 Mooncake MLA host 注册已使用 CPU 张量地址。
+
+本次验证限于本地容量计算、配置分发与静态检查。真实双节点 Mooncake、EAGLE 换输入回放、1M 请求输出及性能仍待验证。
 
 ## 2026-11-23：Qwen-Image 2.1 Ulysses 直收 PR 同步
 

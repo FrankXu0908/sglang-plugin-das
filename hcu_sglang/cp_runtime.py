@@ -205,7 +205,9 @@ def cp_materialize_global_token_order(
 ):
     """Materialize a CP tensor in the global logical token order."""
     if not enable_cp_v2():
-        from sglang.srt.layers.utils.cp_utils import cp_all_gather_rerange_output
+        from hcu_sglang.models.deepseek.current_v4.hcu_backend.hcu_cp_utils import (
+            cp_all_gather_rerange_output,
+        )
 
         return cp_all_gather_rerange_output(
             x, C.get_parallel().attn_cp_size, forward_batch, stream

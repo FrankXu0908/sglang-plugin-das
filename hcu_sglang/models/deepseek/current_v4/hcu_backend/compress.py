@@ -5,6 +5,7 @@ import torch
 from sglang.kernels.jit.utils import cache_once, is_arch_support_pdl, load_jit, make_cpp_args
 from sglang.srt.layers.attention.dsa.utils import INDEXER_K_CACHE_PRESHUFFLE_TILE, aiter_can_use_preshuffle_paged_mqa
 from sglang.srt.utils import is_gfx95_supported, is_hip, is_xpu
+from hcu_sglang.jit_overlay_loader import around_load_jit
 from hcu_sglang.utils.detection import is_hcu as is_hcu
 from sglang.kernels.ops.attention.dsv4.kv_layout import KVLayout
 from sglang.kernels.ops.attention.dsv4.utils import make_name
@@ -26,7 +27,13 @@ def _jit_compress_norm_rope_module(dtype: torch.dtype, head_dim: int, rope_dim: 
             cuda_wrappers.append(('forward_fp4', f'FusedNormRopeKernel<{args}>::forward_fp4'))
     elif fp8_2buff:
         cuda_wrappers.append(('forward_fp8_2buff', f'FusedNormRopeKernel<{args}>::forward_fp8_2buff'))
-    return load_jit(make_name(f'fused_norm_rope_v2'), *args, cuda_files=[f'deepseek_v4/fused_norm_rope_v2.cuh'], cuda_wrappers=cuda_wrappers)
+    return around_load_jit(
+        load_jit,
+        make_name('fused_norm_rope_v2'),
+        *args,
+        cuda_files=['deepseek_v4/fused_norm_rope_v2.cuh'],
+        cuda_wrappers=cuda_wrappers,
+    )
 
 @cache_once
 def _jit_compress_module(head_dim: int, dtype_buffer: torch.dtype, dtype_in: torch.dtype, dtype_out: torch.dtype, ratio: Literal[4, 128]) -> Module:
@@ -43,7 +50,19 @@ def _jit_compress_128_online_module(head_dim: int, dtype_buffer: torch.dtype=tor
 
 @cache_once
 def _jit_compress_plan_module() -> Module:
-    return load_jit(make_name(f'compress_plan_out_rocm_v2'), cuda_files=[f'deepseek_v4/c_plan.cuh'], cuda_wrappers=[('plan_prefill', 'plan_compress_prefill'), ('plan_prefill_out', 'plan_compress_prefill_out'), ('plan_decode', 'plan_compress_decode'), ('plan_decode_out', 'plan_compress_decode_out'), ('plan_prefill_legacy', 'plan_compress_prefill_legacy'), ('plan_decode_legacy', 'plan_compress_decode_legacy')])
+    return around_load_jit(
+        load_jit,
+        make_name('compress_plan_out_rocm_v2'),
+        cuda_files=['deepseek_v4/c_plan.cuh'],
+        cuda_wrappers=[
+            ('plan_prefill', 'plan_compress_prefill'),
+            ('plan_prefill_out', 'plan_compress_prefill_out'),
+            ('plan_decode', 'plan_compress_decode'),
+            ('plan_decode_out', 'plan_compress_decode_out'),
+            ('plan_prefill_legacy', 'plan_compress_prefill_legacy'),
+            ('plan_decode_legacy', 'plan_compress_decode_legacy'),
+        ],
+    )
 _PREFILL_PLAN_BYTES = 24
 
 class CompressorDecodePlan(NamedTuple):

@@ -108,6 +108,9 @@ def _accumulate_cache_tiles(
             tile_positions < topk_length.to(torch.long).unsqueeze(-1)
         )
         k_nope, k_rope = _unpack_nope_fp8_rope_bf16_parts(k_cache, tile_indices)
+        invalid_keys = ~valid.unsqueeze(-1)
+        k_nope = k_nope.masked_fill(invalid_keys, 0.0)
+        k_rope = k_rope.masked_fill(invalid_keys, 0.0)
         logits = torch.einsum("bqhd,bqld->bqhl", q_nope, k_nope)
         logits = logits + torch.einsum("bqhd,bqld->bqhl", q_rope, k_rope)
         logits = logits * softmax_scale

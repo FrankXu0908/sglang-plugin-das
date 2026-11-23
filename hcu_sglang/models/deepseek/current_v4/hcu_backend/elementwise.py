@@ -1,6 +1,7 @@
 from typing import Optional, Tuple, Union
 import torch
 from sglang.kernels.jit.utils import cache_once, is_arch_support_pdl, load_jit, make_cpp_args
+from hcu_sglang.jit_overlay_loader import around_load_jit
 from hcu_sglang.utils.detection import is_hcu as is_hcu
 from sglang.srt.utils import is_hip, is_xpu
 from sglang.kernels.ops.attention.dsv4.kv_layout import KVLayout
@@ -54,7 +55,13 @@ def _jit_main_q_indexer_rope_first_quant_module(dtype: torch.dtype):
 @cache_once
 def _jit_main_q_indexer_rope_hadamard_module(dtype: torch.dtype):
     args = make_cpp_args(dtype, is_arch_support_pdl(), False, True, False)
-    return load_jit(make_name('main_q_indexer_rope_hadamard_bf16'), *args, cuda_files=['deepseek_v4/main_norm_rope.cuh'], cuda_wrappers=[('forward', f'FusedQIndexerRopeHadamardQuantKernel<{args}>::forward')])
+    return around_load_jit(
+        load_jit,
+        make_name('main_q_indexer_rope_hadamard_bf16'),
+        *args,
+        cuda_files=['deepseek_v4/main_norm_rope.cuh'],
+        cuda_wrappers=[('forward', f'FusedQIndexerRopeHadamardQuantKernel<{args}>::forward')],
+    )
 
 @cache_once
 def _jit_main_q_indexer_rope_hadamard_fp4_quant_module(dtype: torch.dtype):

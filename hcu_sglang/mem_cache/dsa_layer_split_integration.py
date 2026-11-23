@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from sglang.srt.mem_cache.kv_cache_configurator import KVCacheConfigurator as NativeKVCacheConfigurator
@@ -127,6 +127,33 @@ def after_default_pool_init(result, configurator, kvc):
 @dataclass(slots=True, kw_only=True)
 class HCUKVCacheConfigurator(NativeKVCacheConfigurator):
     dsa_layer_split_scratch_source: Any = field(default_factory=_scratch_source.get)
+
+    _hisparse_pd_capacity: int | None = field(default=None, init=False)
+
+    def configure(self, *, pre_model_load_memory):
+        from hcu_sglang.layers.attention.hisparse import enabled
+
+        result = super(HCUKVCacheConfigurator, self).configure(
+            pre_model_load_memory=pre_model_load_memory
+        )
+        if not self.is_draft_worker and enabled(w4a8_only=True):
+            self._hisparse_pd_capacity = result.token_to_kv_pool_allocator.size_full
+        return result
+
+    def logical_token_capacity(self, *, max_total_num_tokens):
+        if self._hisparse_pd_capacity is not None:
+            return self._hisparse_pd_capacity
+        return super(HCUKVCacheConfigurator, self).logical_token_capacity(
+            max_total_num_tokens=max_total_num_tokens
+        )
+
+    def _derive_pool_sizes(self, *, config):
+        if isinstance(config.max_total_num_tokens, float):
+            from hcu_sglang.layers.attention.hisparse import enabled
+
+            if enabled(w4a8_only=True):
+                config = replace(config, max_total_num_tokens=int(config.max_total_num_tokens))
+        return super(HCUKVCacheConfigurator, self)._derive_pool_sizes(config=config)
 
     def _build_dsa_kv_pool(
         self, *, max_total_num_tokens, max_running_requests, dsa_pool_class,

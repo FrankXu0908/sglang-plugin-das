@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Optional
 import torch
 from sglang.kernels.jit.utils import cache_once, is_arch_support_pdl, is_hip_runtime, load_jit, make_cpp_args
+from hcu_sglang.jit_overlay_loader import around_load_jit
 from hcu_sglang.utils.detection import is_hcu as is_hcu
 from sglang.srt.utils import is_xpu
 from sglang.kernels.ops.attention.dsv4.candidate_table import CANDIDATE_BLOCK_SIZE
@@ -29,7 +30,14 @@ def _jit_topk_v2_module():
     wrappers = [('topk_transform_paged', f'{kernel}::transform_paged'), ('topk_transform_ragged', f'{kernel}::transform_ragged'), ('topk_plan', f'{kernel}::plan'), ('topk_transform_kpool', f'{kernel}::transform_kpool'), ('topk_transform_kpool_ragged', f'{kernel}::transform_kpool_ragged')]
     if is_hip_runtime():
         wrappers.append(('topk_transform_packed', f'{kernel}::transform_packed'))
-    return load_jit(make_name('topk_v2'), *args, extra_cuda_cflags=extra_cuda_cflags, cuda_files=['deepseek_v4/topk_v2.cuh'], cuda_wrappers=wrappers)
+    return around_load_jit(
+        load_jit,
+        make_name('topk_v2'),
+        *args,
+        extra_cuda_cflags=extra_cuda_cflags,
+        cuda_files=['deepseek_v4/topk_v2.cuh'],
+        cuda_wrappers=wrappers,
+    )
 
 @cache_once
 def _jit_topk_bf16_small_module():

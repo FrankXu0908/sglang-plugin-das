@@ -253,7 +253,7 @@ def around_compute_dsa_indexer_cell_size(
     if memory_config.enable_hisparse:
         from sglang.srt.mem_cache.sparsity import parse_hisparse_config
 
-        indexer_ratio = parse_hisparse_config(kvc.server_args).host_to_device_ratio
+        indexer_ratio = parse_hisparse_config().host_to_device_ratio
 
     if allocate_all_layers or not _should_elide_dsa_index_k(
         is_draft_worker=kvc.is_draft_worker

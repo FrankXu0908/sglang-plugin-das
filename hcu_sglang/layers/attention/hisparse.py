@@ -8,7 +8,7 @@ from pathlib import Path
 from hcu_sglang.utils.detection import is_hcu
 
 
-def _matches_channel_fp8(config):
+def _matches_glm53_shape(config):
     dimensions = {
         "num_hidden_layers": 78,
         "hidden_size": 6144,
@@ -21,7 +21,11 @@ def _matches_channel_fp8(config):
         "n_shared_experts": 1,
         "num_experts_per_tok": 8,
     }
-    if any(getattr(config, key, None) != value for key, value in dimensions.items()):
+    return all(getattr(config, key, None) == value for key, value in dimensions.items())
+
+
+def _matches_channel_fp8(config):
+    if not _matches_glm53_shape(config):
         return False
     quantization = getattr(config, "quantization_config", None)
     if not isinstance(quantization, dict):
@@ -50,7 +54,26 @@ def _matches_channel_fp8(config):
     return True
 
 
-def enabled(view=None):
+def _matches_channel_w4a8(config):
+    quant = getattr(config, "quantization_config", None) or {}
+    if not isinstance(quant, dict) or quant.get("quant_method") != "compressed-tensors":
+        return False
+    has_w4_experts = False
+    for group in (quant.get("config_groups") or {}).values():
+        weight = group.get("weights") or {}
+        act = group.get("input_activations") or {}
+        if (weight.get("type"), weight.get("strategy"), weight.get("num_bits")) not in (
+            ("int", "channel", 4), ("int", "channel", 8),
+        ) or (act.get("type"), act.get("strategy"), act.get("num_bits"), act.get("dynamic")) != (
+            "int", "token", 8, True,
+        ):
+            return False
+        if weight["num_bits"] == 4 and any("experts" in target for target in group.get("targets", ())):
+            has_w4_experts = True
+    return has_w4_experts
+
+
+def enabled(view=None, *, w4a8_only=False):
     if not is_hcu():
         return False
     from sglang.srt.arg_groups.model_override_base import model_config_of, resolved_view
@@ -65,12 +88,17 @@ def enabled(view=None):
         if server_args is None:
             return False
         view = resolved_view(server_args)
+    if not view.enable_hisparse or view.kv_cache_dtype != "fp8_e4m3":
+        return False
     config = model_config_of(view).hf_config
+    if not model_matches(config):
+        return False
+    if not w4a8_only and _matches_channel_fp8(config):
+        return True
     return (
-        view.enable_hisparse
-        and view.kv_cache_dtype == "fp8_e4m3"
-        and model_matches(config)
-        and _matches_channel_fp8(config)
+        view.disaggregation_mode == "decode"
+        and _matches_glm53_shape(config)
+        and _matches_channel_w4a8(config)
     )
 
 
@@ -231,9 +259,14 @@ def after_capture_prepare(result, runner, *args, **kwargs):
 def register_hooks():
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
+    from hcu_sglang.mem_cache.hisparse_capacity import around_allocator_init
     from .hisparse_spec import around_spec_init, around_spec_load
 
     for target, hook in (
+        (
+            "sglang.srt.mem_cache.allocator.hisparse.HiSparseTokenToKVPoolAllocator.__init__",
+            around_allocator_init,
+        ),
         (
             "sglang.srt.managers.hisparse_coordinator.HiSparseSpecSwapManager.__init__",
             around_spec_init,
