@@ -25,6 +25,7 @@
 - [2026-11-19：GLM-5.3 FP8 稳态 prefill 优化](#2026-11-19-glm-53-fp8-稳态-prefill-优化)
 - [2026-11-20：gfx938 Qwen attention 门控与 FP8 量化融合](#2026-11-20-gfx938-qwen-attention-门控与-fp8-量化融合)
 - [2026-11-20：gfx938 Qwen GDN 门控归一化与 FP8 量化融合](#2026-11-20-gfx938-qwen-gdn-门控归一化与-fp8-量化融合)
+- [2026-11-20：Qwen-Image 2.1 四卡 Ulysses 直收](#2026-11-20-qwen-image-21-四卡-ulysses-直收)
 - [附录：布局、操作方式与汇总](#附录布局操作方式与汇总)
 
 两份早期独立开发记录已全文收录。历史结果不代表当前代码已重新验证。
@@ -4213,3 +4214,25 @@ adapter 当前分支与最新 upstream `release/sglang_v0.5.22` 均为
 本文前面的 GPU/Graph/模型/性能数字均为旧证据，不外推至本次新 upstream 组合；
 本次没有重启服务、重跑 GPU kernel、完整模型、SLA 或浏览器渲染。导览模板与交互
 未修改，仅重建文档快照，快照检查不代替视觉验收。
+
+## 2026-11-20 Qwen-Image 2.1 四卡 Ulysses 直收
+
+在 `release/sglang_v0.5.22`（基线 `8b730e0`）将实验插件的 Ulysses 直收迁入
+`hcu` 的 diffusion 注册入口。标记限定在 Qwen-Image 2.1 的目标 attention。
+单样本、Ring 1、Ulysses 多卡、HIP eager 和 Torch SDPA 满足输入条件时，
+all-to-all 将 K/V 直接写入包含 prefix 的最终缓冲区，省去接收后的拼接。
+新形状由所有 rank 共同完成逐位校验。准入失败时所有 rank 回到当前有效的框架路径。
+实现、接线和注册目标分别位于
+[直收实现](../hcu_sglang/multimodal_gen/qwen_image21_direct_recv.py)、
+[attention 注册](../hcu_sglang/multimodal_gen/attention.py)和
+[目标合同](../tests/contracts/hcu_source_alignment_targets.json)。
+
+在社区源码 `baa9befa38`、`sglang0522` 容器和四张 BW1000 上，以正式 `hcu`
+入口验证 SP4、Ulysses 4、Ring 1、TP1。BF16、1024×1024、40 步、CFG 1、
+每请求 1 张，预热后串行测量 10 条 HTTP 请求。正式插件平均 5.015 秒，
+同卡原路径平均 5.316 秒，延迟降低 5.65%。四种 prefix 长度均通过所有 rank
+校验，10 张 PNG 的 SHA256 与原路径及独立实验插件一致。其它并行配置及
+Graph 和 compile 下的端到端行为未单独测量。
+
+离线结构检查通过。全量 unittest 的 1 项失败和 2 项错误在未修改的
+`8b730e0` 基线上同样复现。
