@@ -10,6 +10,7 @@
 | 插件工程初始化 | [工程初始化指南](first-plugin.md) | [hcu-plugin-scaffold](../skills/hcu-plugin-scaffold/SKILL.md) |
 | 插件安装与加载验证 | [安装与启用指南](installation.md) | [hcu-plugin-install](../skills/hcu-plugin-install/SKILL.md) |
 | 当前运行时代码与迁入进展 | [hcu_sglang 开发迁移记录](hcu-sglang-development.md) | [hcu-plugin-dev](../skills/hcu-plugin-dev/SKILL.md) |
+| MoriDAS 后端插件开发 | [MoriDAS 插件化首版开发说明](moridas-plugin-v1-development.md) | [hcu-plugin-dev](../skills/hcu-plugin-dev/SKILL.md) |
 | 插件能力开发 | [能力开发指南](plugins.md) | [hcu-plugin-dev](../skills/hcu-plugin-dev/SKILL.md) |
 | 故障诊断与回归修复 | [故障诊断指南](troubleshooting.md) | [hcu-plugin-triage](../skills/hcu-plugin-triage/SKILL.md) |
 | 研发模块盘点与开发计划 | [迁移规划指南](sglang-das-migration-plan.md) / [网页](../migration-plan.html) | [sglang-hcu-plugin-migration](../skills/sglang-hcu-plugin-migration/SKILL.md) |
@@ -53,6 +54,7 @@ flowchart TB
 | [配置管理](configuration.md) | 路径变量、配置所有权、覆盖与记录 | 新增开关、组合运行 | 参数/默认值/来源变化 |
 | [开发经验与故障案例索引](development-methodology.md) | 上次故障的症状、检查方法、修复经验和适用边界 | 遇到相似问题时查询 | 有实证的新排障经验 |
 | [插件开发](plugins.md) | 新能力从设计、注册到验证的步骤 | 新增或修改能力 | seam、Hook 或状态契约变化 |
+| [MoriDAS 插件化首版开发说明](moridas-plugin-v1-development.md) | 首版架构、文件修改、配置、验证和后续开发路线 | 开发或验证 MoriDAS 后端 | MoriDAS Hook、协议、配置或验证结论变化 |
 | [DAS 模块盘点与迁移规划](sglang-das-migration-plan.md) | 全量目录/符号、当前差异、现有映射线索及研发建议计划 | 拆分 DAS 到 plugin 的研发任务 | 来源版本、模块边界或计划定义变化 |
 | [三方迁移](migration.md) | official/fork/plugin 审计、清单和台账 | 同步 fork、升级官方版本 | 工具参数或外部布局变化 |
 | [源码回溯](backtracking.md) | 生成内嵌源码树、保护与哈希核验 | 复现/交付 embedded 树 | 注入 anchor 或清单变化 |

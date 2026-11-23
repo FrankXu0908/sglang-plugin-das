@@ -125,7 +125,13 @@ class CompressedTensorsW8A8Int8MarlinMoEMethod(CompressedTensorsMarlinMoEMethod)
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if getattr(layer, "use_int8_w8a8_deepgemm", False):
+        from hcu_sglang.layers.moe import mori_das
+
+        # MoriDAS currently supports only its own packed layout, not the
+        # DeepEP-specific INT8 weight preparation path.
+        if getattr(layer, "use_int8_w8a8_deepgemm", False) and not isinstance(
+            getattr(layer, "dispatcher", None), mori_das.MoriDasDispatcher
+        ):
             from hcu_sglang.layers.quantization.hcu_deepgemm_w8a8_utils import (
                 prepare_w8a8_int8_deepgemm_weights,
             )

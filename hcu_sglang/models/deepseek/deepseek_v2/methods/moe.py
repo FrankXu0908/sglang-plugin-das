@@ -1151,6 +1151,7 @@ def forward_normal_dual_stream(
         not N0._is_cuda
         and not N0._is_musa
         and not N0._use_aiter
+        and not getattr(self.experts.quant_method, "scales_routed_output", False)
         or isinstance(self.experts.quant_method, N0.KTEPWrapperMethod)
     ):
         final_hidden_states *= self.routed_scaling_factor

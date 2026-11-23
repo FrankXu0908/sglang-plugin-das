@@ -1068,6 +1068,56 @@ class SlimQuantW4A8Int8MarlinConfig(QuantizationConfig):
 from hcu_sglang.layers.quantization.compressed_w4a8 import HCUW4A8Int8DeepEPMoEMethod
 
 
+@torch._dynamo.disable()
+def apply_w4a8_marlin_lightop(
+    layer: torch.nn.Module,
+    dispatch_output,
+    moe_runner_config,
+    fused_experts,
+):
+    from sglang.srt.layers.moe.token_dispatcher.standard import StandardCombineInput
+    from sglang.srt.layers.moe.topk import apply_topk_weights_cpu
+
+    x = dispatch_output.hidden_states
+    topk_output = dispatch_output.topk_output
+    topk_weights, topk_ids, _ = topk_output
+    x, topk_weights = apply_topk_weights_cpu(
+        moe_runner_config.apply_router_weight_on_input, topk_weights, x
+    )
+    workspace, global_reduce_buffer = MarlinMoeWorkspace(x.device).get_buffers()
+    routed_scaling_factor = (
+        moe_runner_config.routed_scaling_factor
+        if moe_runner_config.routed_scaling_factor is not None
+        else 1.0
+    )
+    output = fused_experts(
+        x,
+        layer.w13_weight,
+        layer.w2_weight,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        workspace=workspace,
+        global_reduce_buffer=global_reduce_buffer,
+        # Honor the caller's inplace setting: the fused shared-expert gate
+        # re-reads hidden_states after the routed experts, so the routed
+        # output must not alias the MoE input buffer.
+        inplace=moe_runner_config.inplace,
+        use_int4_w4a8=True,
+        per_channel_quant=True,
+        activation=layer.moe_runner_config.activation,
+        expert_map=getattr(layer, "expert_map", None),
+        apply_router_weight_on_input=moe_runner_config.apply_router_weight_on_input,
+        global_num_experts=layer.moe_runner_config.num_experts,
+        w1_scale=(layer.w13_weight_scale),
+        w2_scale=(layer.w2_weight_scale),
+        a1_scale=layer.w13_input_scale,
+        a2_scale=layer.w2_input_scale,
+        use_nn_moe=False,
+        routed_scaling_factor=routed_scaling_factor,
+    )
+    return StandardCombineInput(hidden_states=output)
+
+
 class SlimQuantW4A8Int8MarlinMoEMethod:
     """MoE method for W4A8INT8 Marlin.
     Supports loading INT8 checkpoints with static weight scale and
@@ -1312,55 +1362,9 @@ class SlimQuantW4A8Int8MarlinMoEMethod:
     ):
         if not _use_lightop_w4a8_marlin_moe:
             return self.runner.run(dispatch_output, self._get_triton_quant_info(layer))
-        return self._apply_w4a8_marlin_lightop(layer, dispatch_output)
-
-    @torch._dynamo.disable()
-    def _apply_w4a8_marlin_lightop(
-        self,
-        layer: torch.nn.Module,
-        dispatch_output,
-    ):
-        from sglang.srt.layers.moe.token_dispatcher.standard import StandardCombineInput
-        from sglang.srt.layers.moe.topk import apply_topk_weights_cpu
-
-        x = dispatch_output.hidden_states
-        topk_output = dispatch_output.topk_output
-        topk_weights, topk_ids, _ = topk_output
-        x, topk_weights = apply_topk_weights_cpu(
-            self.moe_runner_config.apply_router_weight_on_input, topk_weights, x
+        return apply_w4a8_marlin_lightop(
+            layer, dispatch_output, self.moe_runner_config, self.fused_experts_impl_w4a8_marlin
         )
-        workspace, global_reduce_buffer = MarlinMoeWorkspace(x.device).get_buffers()
-        routed_scaling_factor = (
-            self.moe_runner_config.routed_scaling_factor
-            if self.moe_runner_config.routed_scaling_factor is not None
-            else 1.0
-        )
-        output = self.fused_experts_impl_w4a8_marlin(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            workspace=workspace,
-            global_reduce_buffer=global_reduce_buffer,
-            # Honor the caller's inplace setting: the fused shared-expert gate
-            # re-reads hidden_states after the routed experts, so the routed
-            # output must not alias the MoE input buffer.
-            inplace=self.moe_runner_config.inplace,
-            use_int4_w4a8=True,
-            per_channel_quant=True,
-            activation=layer.moe_runner_config.activation,
-            expert_map=getattr(layer, "expert_map", None),
-            apply_router_weight_on_input=self.moe_runner_config.apply_router_weight_on_input,
-            global_num_experts=layer.moe_runner_config.num_experts,
-            w1_scale=(layer.w13_weight_scale),
-            w2_scale=(layer.w2_weight_scale),
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
-            use_nn_moe=False,
-            routed_scaling_factor=routed_scaling_factor,
-        )
-        return StandardCombineInput(hidden_states=output)
 
     @torch._dynamo.disable()
     def apply_with_shared_output(

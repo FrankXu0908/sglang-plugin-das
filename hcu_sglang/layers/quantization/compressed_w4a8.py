@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from functools import partial
 import torch
 import torch.nn.functional as F
@@ -32,11 +33,7 @@ def _load_transposed_checkpoint_weight(
     return original_loader(param, loaded_weight.t().contiguous(), *args, **kwargs)
 
 
-class HCUW4A8Int8DeepEPMoEMethod(FusedMoEMethodBase):
-    # DeepEPMoE selects this method independently of the global CT config,
-    # which still resolves mixed W8A8 Linear layers.
-    hcu_w4a8_hipc = True
-
+class _HCUW4A8Int8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config):
         self.quant_config = quant_config
 
@@ -80,14 +77,6 @@ class HCUW4A8Int8DeepEPMoEMethod(FusedMoEMethodBase):
             layer.register_parameter(name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
-    def create_moe_runner(self, layer, moe_runner_config):
-        if moe_runner_config.activation != "silu" or not moe_runner_config.is_gated:
-            raise ValueError("HCU W4A8 HIPC supports gated SiLU only")
-        if moe_runner_config.apply_router_weight_on_input:
-            raise ValueError("HCU W4A8 HIPC applies router weights on output only")
-        self.moe_runner_config = moe_runner_config
-        self.runner = None  # DeepEPMoE owns contiguous/masked compute.
-
     @staticmethod
     def _convert_packed_weight(weight):
         weight = weight.transpose(1, 2).contiguous().view(torch.uint8)
@@ -113,6 +102,53 @@ class HCUW4A8Int8DeepEPMoEMethod(FusedMoEMethodBase):
         )
         storage[: scale.numel()].copy_(scale.reshape(-1))
         return storage[: scale.numel()].view_as(scale)
+
+
+class HCUW4A8Int8TPMoEMethod(_HCUW4A8Int8MoEMethod):
+    scales_routed_output = True
+
+    def create_moe_runner(self, layer, moe_runner_config):
+        from lightop.moe import fused_experts_impl_w4a8_marlin
+
+        if not moe_runner_config.is_gated or moe_runner_config.activation != "silu":
+            raise ValueError("GLM CT W4A8 TP requires gated SiLU")
+        self.moe_runner_config = replace(moe_runner_config, inplace=False)
+        self.fused_experts_impl_w4a8_marlin = fused_experts_impl_w4a8_marlin
+
+    def process_weights_after_loading(self, layer):
+        for prefix in ("w13", "w2"):
+            packed_name = prefix + "_weight_packed"
+            weight = self._convert_packed_weight(getattr(layer, packed_name).data)
+            packed = w4a8_weight_repack_impl(weight, use_deepep=False)
+            layer.register_parameter(
+                prefix + "_weight", torch.nn.Parameter(packed, requires_grad=False)
+            )
+            delattr(layer, packed_name)
+            scale_name = prefix + "_weight_scale"
+            scale = self._channel_scale(getattr(layer, scale_name).data, compact=True)
+            setattr(layer, scale_name, torch.nn.Parameter(scale, requires_grad=False))
+            layer.register_parameter(prefix + "_input_scale", None)
+
+    def apply(self, layer, dispatch_output):
+        from hcu_sglang.layers.quantization.slimquant_w4a8_marlin import (
+            apply_w4a8_marlin_lightop,
+        )
+
+        return apply_w4a8_marlin_lightop(
+            layer, dispatch_output, self.moe_runner_config, self.fused_experts_impl_w4a8_marlin
+        )
+
+
+class HCUW4A8Int8DeepEPMoEMethod(_HCUW4A8Int8MoEMethod):
+    hcu_w4a8_hipc = True
+
+    def create_moe_runner(self, layer, moe_runner_config):
+        if moe_runner_config.activation != "silu" or not moe_runner_config.is_gated:
+            raise ValueError("HCU W4A8 HIPC supports gated SiLU only")
+        if moe_runner_config.apply_router_weight_on_input:
+            raise ValueError("HCU W4A8 HIPC applies router weights on output only")
+        self.moe_runner_config = moe_runner_config
+        self.runner = None  # DeepEPMoE owns contiguous/masked compute.
 
     def process_weights_after_loading(self, layer):
         import deepgemm
@@ -232,9 +268,64 @@ class HCUW4A8Int8DeepEPMoEMethod(FusedMoEMethodBase):
         return SlimQuantW4A8Int8MarlinMoEMethod.apply_ep(self, **kwargs)
 
 
+def _is_channel_w4a8(config, scheme):
+    from compressed_tensors.quantization import QuantizationStrategy, QuantizationType
+
+    if not scheme:
+        return False
+    weight = scheme.get("weights")
+    activation = scheme.get("input_activations")
+    return (
+        weight is not None
+        and activation is not None
+        and weight.type == QuantizationType.INT
+        and activation.type == QuantizationType.INT
+        and config._is_dynamic_token_w4a8(weight, activation)
+        and weight.strategy == QuantizationStrategy.CHANNEL
+        and weight.symmetric
+        and activation.symmetric
+        and weight.actorder is None
+    )
+
+
+def _uses_glm_tp8_lightop(hf_config):
+    from sglang.srt.environ import envs
+    from sglang.srt.layers.moe.utils import get_moe_a2a_backend, get_moe_runner_backend
+    from sglang.srt.runtime_context import get_parallel
+    from hcu_sglang.layers.glm53_decode import model_matches
+
+    return (
+        model_matches(hf_config)
+        and envs.SGLANG_W4A8_TPMOE_BACKEND.get() == "lightop"
+        and get_moe_a2a_backend().is_none()
+        and get_moe_runner_backend().is_auto()
+        and get_parallel().moe_ep_size == 1
+        and get_parallel().moe_tp_size == 8
+    )
+
+
+def shared_experts_fusion_disable_reason(original, cls, hf_config, quant_config):
+    from hcu_sglang.utils.detection import is_hcu
+
+    if (
+        quant_config is not None
+        and quant_config.get_name() == "compressed_tensors"
+        and is_hcu()
+        and _uses_glm_tp8_lightop(hf_config)
+    ):
+        schemes = quant_config.target_scheme_map
+        linear = schemes.get("Linear", {}).get("weights")
+        if (
+            linear is not None
+            and linear.num_bits == 8
+            and any(_is_channel_w4a8(quant_config, scheme) for scheme in schemes.values())
+        ):
+            return "GLM CT TP8 loads W8A8 shared experts separately from W4A8 routed experts."
+    return original(cls, hf_config, quant_config)
+
+
 def around_get_quant_method(original, config, layer, prefix):
     from compressed_tensors import CompressionFormat
-    from compressed_tensors.quantization import QuantizationStrategy, QuantizationType
     from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
     from sglang.srt.layers.moe.utils import get_moe_a2a_backend, get_moe_runner_backend
     from hcu_sglang.utils.detection import is_hcu
@@ -242,10 +333,19 @@ def around_get_quant_method(original, config, layer, prefix):
     if not (
         is_hcu()
         and isinstance(layer, FusedMoE)
-        and get_moe_runner_backend().is_deep_gemm()
-        and get_moe_a2a_backend().is_deepep()
         and config.quant_format == CompressionFormat.pack_quantized.value
     ):
+        return original(config, layer, prefix)
+    backend = get_moe_a2a_backend()
+    if backend.is_deepep() and get_moe_runner_backend().is_deep_gemm():
+        method = HCUW4A8Int8DeepEPMoEMethod
+    elif backend.is_none() and layer.moe_tp_size == 8 and layer.moe_ep_size == 1:
+        from sglang.srt.runtime_context import process_model_config
+
+        if not _uses_glm_tp8_lightop(process_model_config().hf_config):
+            return original(config, layer, prefix)
+        method = HCUW4A8Int8TPMoEMethod
+    else:
         return original(config, layer, prefix)
     config._add_fused_moe_to_target_scheme_map()
     try:
@@ -260,21 +360,8 @@ def around_get_quant_method(original, config, layer, prefix):
         raise ValueError(
             "All MoE projections need to have the same quantization scheme"
         )
-    if scheme is not None:
-        weight = scheme.get("weights")
-        activation = scheme.get("input_activations")
-        if (
-            weight is not None
-            and activation is not None
-            and weight.type == QuantizationType.INT
-            and activation.type == QuantizationType.INT
-            and config._is_dynamic_token_w4a8(weight, activation)
-            and weight.strategy == QuantizationStrategy.CHANNEL
-            and weight.symmetric
-            and activation.symmetric
-            and weight.actorder is None
-        ):
-            return HCUW4A8Int8DeepEPMoEMethod(config)
+    if _is_channel_w4a8(config, scheme):
+        return method(config)
     return original(config, layer, prefix)
 
 
@@ -284,5 +371,10 @@ def register_hooks():
     HookRegistry.register(
         "sglang.srt.layers.quantization.compressed_tensors.compressed_tensors.CompressedTensorsConfig.get_quant_method",
         around_get_quant_method,
+        HookType.AROUND,
+    )
+    HookRegistry.register(
+        "sglang.srt.models.deepseek_v2.DeepseekV2ForCausalLM.shared_experts_fusion_disable_reason",
+        shared_experts_fusion_disable_reason,
         HookType.AROUND,
     )

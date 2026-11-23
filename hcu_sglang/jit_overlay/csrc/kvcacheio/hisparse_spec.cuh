@@ -11,7 +11,9 @@
 #include <dlpack/dlpack.h>
 #include <tvm/ffi/container/tensor.h>
 
+#include <stdexcept>
 #include <stdint.h>
+#include <string>
 
 namespace sglang {
 
@@ -24,8 +26,44 @@ constexpr int WARP_SIZE = 32;
 using BallotMask = unsigned int;
 constexpr BallotMask FULL_WARP_MASK = 0xFFFFFFFFu;
 #endif
+template <typename T>
+__device__ __forceinline__ T hisparse_spec_shfl(T value, int lane) {
+#ifdef USE_ROCM
+  return __shfl(value, lane, WARP_SIZE);
+#else
+  return __shfl_sync(FULL_WARP_MASK, value, lane);
+#endif
+}
+
+__device__ __forceinline__ BallotMask hisparse_spec_ballot(bool predicate) {
+#ifdef USE_ROCM
+  return __ballot(predicate);
+#else
+  return __ballot_sync(FULL_WARP_MASK, predicate);
+#endif
+}
+
+inline const void* hisparse_spec_host_data_ptr(const tvm::ffi::TensorView& tensor) {
+#ifdef USE_ROCM
+  const auto device_type = tensor.device().device_type;
+  if (device_type == kDLCPU || device_type == kDLGPUHost) {
+    void* device_ptr = nullptr;
+    const auto status = ::hipHostGetDevicePointer(&device_ptr, tensor.data_ptr(), 0);
+    if (status != hipSuccess) {
+      throw std::runtime_error(std::string("HiSparse spec host pointer mapping: ") + hipGetErrorString(status));
+    }
+    return device_ptr;
+  }
+#endif
+  return tensor.data_ptr();
+}
+
 constexpr int64_t HASH_DELETED = -2;
+#ifdef USE_ROCM
+constexpr int32_t COMPACT_HASH_BITS = 14;
+#else
 constexpr int32_t COMPACT_HASH_BITS = 13;
+#endif
 constexpr int32_t COMPACT_HASH_MASK = (1 << COMPACT_HASH_BITS) - 1;
 constexpr int32_t COMPACT_APPROX_CLAIM_FLAG = int32_t{1} << 29;
 constexpr int32_t COMPACT_APPROX_ADMIT_FLAG = int32_t{1} << 30;
@@ -363,7 +401,7 @@ __device__ __forceinline__ void transfer_item_warp(int32_t lane_id, const void* 
 
 __device__ __forceinline__ int first_set_lane(BallotMask mask) {
 #ifdef USE_ROCM
-  return __ffsll(mask) - 1;
+  return __ffsll(static_cast<unsigned long long>(mask)) - 1;
 #else
   return __ffs(mask) - 1;
 #endif
@@ -513,8 +551,8 @@ __global__ void load_cache_to_device_buffer_spec_gather_kernel(
     const int32_t lanes_per_step = static_cast<int32_t>(NUM_TOP_K / total_warps);
     if (lanes_per_step > 0 && NUM_STEPS * lanes_per_step <= WARP_SIZE) {
       lookup_owner_lane = lane_id % lanes_per_step;
-      const int32_t owner_token = __shfl_sync(FULL_WARP_MASK, token, lookup_owner_lane);
-      const int32_t owner_needs_lookup = __shfl_sync(FULL_WARP_MASK, needs_cache_lookup ? 1 : 0, lookup_owner_lane);
+      const int32_t owner_token = hisparse_spec_shfl(token, lookup_owner_lane);
+      const int32_t owner_needs_lookup = hisparse_spec_shfl(needs_cache_lookup ? 1 : 0, lookup_owner_lane);
       reuse_owner_loc =
           needs_cache_lookup && lane_id != lookup_owner_lane && owner_needs_lookup != 0 && owner_token == token;
     }
@@ -532,7 +570,7 @@ __global__ void load_cache_to_device_buffer_spec_gather_kernel(
         const auto epoch_bits = static_cast<unsigned long long>(static_cast<uint32_t>(scratch_epoch)) << 32;
         const auto token_bits = static_cast<uint32_t>(token);
         const auto packed = epoch_bits | token_bits;
-        for (int64_t attempt = 0; attempt < total_occurrences; ++attempt) {
+        for (int64_t attempt = 0; attempt < total_occurrences;) {
           auto old = atomicCAS(req_scratch_table + hash_pos, 0ull, 0ull);
           if (static_cast<uint32_t>(old >> 32) != static_cast<uint32_t>(scratch_epoch)) {
             const auto claimed = atomicCAS(req_scratch_table + hash_pos, old, packed);
@@ -564,13 +602,14 @@ __global__ void load_cache_to_device_buffer_spec_gather_kernel(
             break;
           }
           hash_pos = next_hash_slot(hash_pos, static_cast<int>(total_occurrences));
+          ++attempt;
         }
       }
     }
   }
 
-  const int32_t owner_loc = __shfl_sync(FULL_WARP_MASK, loc, lookup_owner_lane);
-  const int32_t owner_cache_slot = __shfl_sync(FULL_WARP_MASK, cache_slot, lookup_owner_lane);
+  const int32_t owner_loc = hisparse_spec_shfl(loc, lookup_owner_lane);
+  const int32_t owner_cache_slot = hisparse_spec_shfl(cache_slot, lookup_owner_lane);
   if (reuse_owner_loc) {
     loc = owner_loc;
     cache_slot = owner_cache_slot;
@@ -584,15 +623,15 @@ __global__ void load_cache_to_device_buffer_spec_gather_kernel(
     req_top_k_device_locs[occ] = loc;
   }
 
-  BallotMask copy_mask = __ballot_sync(FULL_WARP_MASK, copy_owner);
+  BallotMask copy_mask = hisparse_spec_ballot(copy_owner);
   while (copy_mask != 0) {
     const int owner_lane = first_set_lane(copy_mask);
-    const int32_t copy_token = __shfl_sync(FULL_WARP_MASK, token, owner_lane);
-    const int32_t copy_loc = __shfl_sync(FULL_WARP_MASK, loc, owner_lane);
-    const int64_t copy_src_loc = __shfl_sync(FULL_WARP_MASK, src_loc, owner_lane);
+    const int32_t copy_token = hisparse_spec_shfl(token, owner_lane);
+    const int32_t copy_loc = hisparse_spec_shfl(loc, owner_lane);
+    const int64_t copy_src_loc = hisparse_spec_shfl(src_loc, owner_lane);
     if (copy_token >= 0 && copy_loc >= 0 && copy_src_loc >= 0) {
       if constexpr (RecordMissPlan) {
-        const int32_t copy_miss_idx = __shfl_sync(FULL_WARP_MASK, miss_idx, owner_lane);
+        const int32_t copy_miss_idx = hisparse_spec_shfl(miss_idx, owner_lane);
         if (lane_id == owner_lane) {
           miss_src_out[bid * plan_stride + copy_miss_idx] = copy_src_loc;
           miss_dst_out[bid * plan_stride + copy_miss_idx] = copy_loc;
@@ -607,7 +646,7 @@ __global__ void load_cache_to_device_buffer_spec_gather_kernel(
 }
 
 template <int NUM_TOP_K, int HOT_BUFFER_SIZE, int ITEM_SIZE_BYTES, int NUM_STEPS, bool RecordMissPlan, bool USE_PDL>
-__global__ void load_cache_to_device_buffer_spec_commit_kernel(
+__global__ __launch_bounds__(512) void load_cache_to_device_buffer_spec_commit_kernel(
     const int32_t* __restrict__ top_k_tokens,
     int32_t* __restrict__ top_k_device_locs,
     int32_t* __restrict__ device_buffer_tokens,
@@ -859,14 +898,14 @@ __global__ void load_cache_to_device_buffer_spec_commit_kernel(
       }
     }
 
-    BallotMask copy_mask = __ballot_sync(FULL_WARP_MASK, copy_owner);
+    BallotMask copy_mask = hisparse_spec_ballot(copy_owner);
     while (copy_mask != 0) {
       const int owner_lane = first_set_lane(copy_mask);
-      const int64_t src_loc = __shfl_sync(FULL_WARP_MASK, copy_src_loc, owner_lane);
-      const int32_t dst_loc = __shfl_sync(FULL_WARP_MASK, copy_dst_loc, owner_lane);
+      const int64_t src_loc = hisparse_spec_shfl(copy_src_loc, owner_lane);
+      const int32_t dst_loc = hisparse_spec_shfl(copy_dst_loc, owner_lane);
       if (src_loc >= 0 && dst_loc >= 0) {
         if constexpr (RecordMissPlan) {
-          const int32_t miss_idx = __shfl_sync(FULL_WARP_MASK, unique_idx, owner_lane);
+          const int32_t miss_idx = hisparse_spec_shfl(unique_idx, owner_lane);
           if (lane_id == owner_lane) {
             miss_src_out[bid * plan_stride + miss_idx] = src_loc;
             miss_dst_out[bid * plan_stride + miss_idx] = dst_loc;
@@ -957,9 +996,14 @@ void load_cache_to_device_buffer_spec(
     tvm::ffi::TensorView miss_count_out) {
   using namespace host;
 
-  static_assert(NUM_STEPS > 1 && NUM_STEPS <= 4, "HiSparse speculative swap requires 2-4 steps.");
+#ifdef USE_ROCM
+  static_assert(NUM_STEPS >= 1 && NUM_STEPS <= 6, "HiSparse speculative swap requires 1-6 steps.");
+#else
+  static_assert(NUM_STEPS >= 2 && NUM_STEPS <= 4, "HiSparse speculative swap requires 2-4 steps.");
+#endif
   static_assert(NUM_TOP_K >= 1024, "HiSparse speculative swap requires top_k >= 1024.");
-  static_assert(NUM_STEPS * NUM_TOP_K <= 8192, "HiSparse speculative swap supports at most 8192 occurrences.");
+  static_assert(
+      NUM_STEPS * NUM_TOP_K <= (1 << COMPACT_HASH_BITS), "HiSparse speculative swap exceeds compact hash capacity.");
 
   const int64_t bs = top_k_tokens.shape()[0];
   constexpr int64_t total_occurrences = NUM_STEPS * NUM_TOP_K;
@@ -1062,7 +1106,7 @@ void load_cache_to_device_buffer_spec(
       static_cast<int32_t*>(device_buffer_tokens.data_ptr()),
       static_cast<const int64_t*>(host_cache_locs.data_ptr()),
       static_cast<int32_t*>(device_buffer_locs.data_ptr()),
-      host_cache_k.data_ptr(),
+      hisparse_spec_host_data_ptr(host_cache_k),
       device_buffer_k.data_ptr(),
       static_cast<int32_t*>(top_k_device_locs.data_ptr()),
       static_cast<const int64_t*>(req_pool_indices.data_ptr()),
@@ -1094,7 +1138,7 @@ void load_cache_to_device_buffer_spec(
           static_cast<int32_t*>(device_buffer_tokens.data_ptr()),
           static_cast<int32_t*>(device_buffer_locs.data_ptr()),
           static_cast<const int64_t*>(host_cache_locs.data_ptr()),
-          host_cache_k.data_ptr(),
+          hisparse_spec_host_data_ptr(host_cache_k),
           device_buffer_k.data_ptr(),
           static_cast<const int64_t*>(req_pool_indices.data_ptr()),
           cache_state,

@@ -26,6 +26,8 @@
 - [2026-11-20：gfx938 Qwen attention 门控与 FP8 量化融合](#2026-11-20-gfx938-qwen-attention-门控与-fp8-量化融合)
 - [2026-11-20：gfx938 Qwen GDN 门控归一化与 FP8 量化融合](#2026-11-20-gfx938-qwen-gdn-门控归一化与-fp8-量化融合)
 - [2026-11-20：Qwen-Image 2.1 四卡 Ulysses 直收](#2026-11-20-qwen-image-21-四卡-ulysses-直收)
+- [2026-11-20：MoriDAS Masked INT8 GEMM 写入契约](#2026-11-20-moridas-masked-int8-gemm-写入契约)
+- [2026-11-23：Qwen-Image 2.1 Ulysses 直收 PR 同步](#2026-11-23-qwen-image-21-ulysses-直收-pr-同步)
 - [附录：布局、操作方式与汇总](#附录布局操作方式与汇总)
 
 两份早期独立开发记录已全文收录。历史结果不代表当前代码已重新验证。
@@ -3752,6 +3754,18 @@ Channel FP8 依赖配套 adapter 的 DeepEP 量化粒度透传。上述环境还
 DTK26.10/Python3.12 镜像中的真实插件发现、构造和 AROUND 分发已通过：两组八 rank 的 Q/K 共 32 项逐元素匹配原生；同一 Graph 更换输入后重放两组 Q/K，也均逐元素匹配。FP32 canonical cache 对象未变，typed memo 为 BF16，关闭开关后的构造保持原分支。记录为任务产物 `rope-runtime-v4.json`；固定参考和捕获哈希见 adapter-das `docs/glm5.3-w4a8-attention-alignment.json`。offsets 与融合 KV-store 保留原语义，但本轮组件不声称覆盖这些调用。移除观测后的六组模型数值合同仍待复测；组件通过不等于模型精度通过。
 
 
+## 2026-11-12 MoriDAS 独立插件后端首版
+
+基于 SGLang v0.5.22 `baa9befa3815` 和 HCU Plugin `60e37ce`，参考 `sglang-das-main` 的 `96a468c..e35c100`。插件注册 `mori-das`，复用 DeepEP Low-Latency 模型入口与数据协议，接入独立的 MoriDAS dispatcher。首轮通过 5 项 CPU 契约测试。
+
+## 2026-11-19 MoriDAS 与 0.5.22 发布分支合并
+
+- Plugin 基线更新到 `708a332`，配套 Adapter `69955d8`。MoriDAS 按实际 dispatcher 进入独立的 INT8 core，使用原有权重布局和注册 Combine buffer。默认 kernel 为 `InterNodeV1LLChunkedSync`，SwiGLU clamp 读取模型上限并沿用现有融合开关。
+- DSpark 的 target 和 draft 均可选择 MoriDAS。DP 元数据同步和 Graph 投票沿用 Plugin 通用实现。合入前的 BS128 调度对照中，两种实现各完成 4096 条请求，均启用 DP 元数据同步和 `stream_interval=16`。
+- 合并后的定向回归通过 31 项和 9 个子用例。Plugin 全量单测 197 项通过，13 项跳过。
+- 初测遇到 Mori UniqueId TCP 建环错误。后续使用 Mori 注册重试版 `0.1.dev292+g2ce4cc7.tcpretry.20261119`，开启 `SGLANG_HCU_JIT_OVERLAY=1` 解决 HCU JIT 符号缺失。双节点 TP16 / Attention DP16 / EP16、BS1、SingleChunk、L2 flush、HBM DBR 下，关闭和开启 DSpark 的 Full CUDA Graph FakeDecode 各完成 32/32 条，Mean TPOT 分别为 65.74 ms 和 20.92 ms。此次复测覆盖服务启动、图捕获和性能，模型精度另行验证。
+
+支持范围、文件职责及调用路径见 [MoriDAS 插件后端开发导读](moridas-plugin-v1-development.md)。
 ## GLM5.2 SlimQuant native numerical policies (2026-11-19)
 
 Purpose and scope: extend the existing GLM HCU numerical policies to SlimQuant W4A8. The router remains opt-in through `SGLANG_HCU_GLM_CT_BF16_ROUTER=1`; its non-hash and non-DeepSeek-V4 guards remain intact. NextN selects separate EH normalization for the same two SlimQuant names. FP32 router weights and other quantization families retain their existing paths.
@@ -4236,3 +4250,73 @@ Graph 和 compile 下的端到端行为未单独测量。
 
 离线结构检查通过。全量 unittest 的 1 项失败和 2 项错误在未修改的
 `8b730e0` 基线上同样复现。
+
+## GLM-5.3 CT W4A8 四节点 P/D 配方回移（SGLang 0.5.22）
+
+同步主线 #23 的 `SGLANG_HCU_W8A8_USE_LIGHTOP` 注册项。GLM-5.3 的 CT checkpoint 同时包含 channel INT4 专家和 W8A8 Linear。P、D 配方显式设为 `1` 时，Linear 的 `quant_ops.triton_scaled_mm` 将输入、scale、bias 和调优参数交给 `lightop.gemm_ops.triton_scaled_mm`。默认值为 false，保留原有小 M 调优。专家继续由 `HCUW4A8Int8DeepEPMoEMethod` 处理，normal 与 low-latency 的 dispatcher 输出均为 INT8。
+
+本次验证范围为环境注册和分发选择。四节点真实请求、变输入 Graph replay、性能和数据集精度留待配套 adapter 部署后验证。
+
+发布分支的 GLM-5.3 Channel FP8 配方允许省略量化 CLI 参数。官方 0.5.22 按 checkpoint 解析量化后，GLM DSA 的 top-1 EAGLE 非 greedy verify 复用已有的目标 token 采样和树匹配。CUDA 平台兼容模式下，按宿主的 attention TP 或 TP 组同步三个 verify 输出；宿主走 HIP 分支时由宿主同步。自动识别同时检查 Channel FP8 配置和已解析的 compressed-tensors 方式。显式 CT、greedy、rejection sampling 和 watermark 沿用既有分发。检测可见 HIP 设备的架构失败时，启动报告原始异常，便于定位缺少的设备元数据。隔离验证覆盖分发条件和失败后重试；gfx938 真实请求及跨 rank 重放待验证。
+
+### GLM-5.3 compressed-tensors TP8/EP1 W4A8
+
+合设 IFB 使用与 P/D 相同的 mixed INT4/INT8 compressed-tensors checkpoint。
+在 HCU 上选择标准 TP8/EP1 分发、默认 MoE runner 和
+`SGLANG_W4A8_TPMOE_BACKEND=lightop`，配套 adapter 设置 `HCU_W4A8_MOE=native`。
+主模型与 NextN 按 checkpoint 的专家 scheme 分发。W8A8 共享专家独立加载；
+路由专家先按 TP 分片，再转换 CT 的 nibble 顺序和逐通道 scale，重排为 TP Marlin，
+由 LightOp 以动态 INT8 激活执行。双流模式保留共享专家输入，路由系数只应用一次。
+DeepEP P/D 继续使用已有的 contiguous/masked 路径。
+
+离线使用官方 v0.5.22 的分片函数核对了八个 TP rank 的合成 gate/up/down 权重和 scale。
+镜像内 LightOp ABI、实际 kernel、换输入 Graph 重放、性能与真实请求精度待上卡验证。
+
+## 2026-11-20：MoriDAS Masked INT8 GEMM 写入契约
+
+基于 `27c42b6`，修正 `hcu_sglang/layers/moe/mori_das.py` 的
+`sglang::mori_grouped_i8_gemm_nt_masked`。SGLang 启用 `--enable-torch-compile`
+时按 batch size 编译模型 forward。MoriDAS 的两个 GEMM 以自定义算子节点留在图中，
+GEMM 由 DeepGEMM 执行。算子声明 `output` 可写，真实实现和 fake 实现返回 `None`；
+两处调用继续读取各自的输出缓冲区。DeepEP 有独立的 INT8 core，直接调用 DeepGEMM
+并沿用自身的 SwiGLU 量化封装。
+
+源码树的 MoriDAS 定向单测通过 14 项。536 gfx936 上的真实 masked GEMM 通过
+`opcheck` 的 schema 和 FakeTensor 检查。使用当前 `run_moe_core()`、真实 DeepGEMM
+和 LightOp，编译图记录了两个 GEMM 节点、切片 clamp 和 SwiGLU 量化节点。Inductor
+与 eager 的有效行逐元素一致，保留了探针传入的 GEMM2 输出地址。Full CUDA Graph
+更换输入重放两次，与同输入 eager 结果一致。
+
+组件探针用调用方缓冲区模拟 Combine buffer。双节点真实注册缓冲区、Combine 和完整模型
+开启 Torch Compile 的执行仍待验证。
+
+### MoriDAS 通信的 Dynamo 边界
+
+`MoriDasDispatcher.dispatch_b()` 和 `combine_b()` 使用 `@torch._dynamo.disable()`，
+与 DeepEP 的 B 阶段对齐。开启 `torch.compile` 时，两个原生通信调用在 Dynamo 图外执行，
+先前定义的写入契约仍让两个 GEMM 位于可编译图中。SGLang 的 Decode 编译允许在这些
+显式边界分段。此改动不改变 CUDA Graph 的捕获配置。
+
+536 上的定向单测通过 15 项。新增回归在修复前观察到 Dispatch 在追踪中执行，修复后
+两个通信调用均在图外，状态机正常回到初始状态。真实 DeepGEMM 和 LightOp 加通信替身
+的组件探针在 `aot_eager` 和 Inductor 下均与 eager 逐元素一致，且 Combine 入口收到
+调用方提供的原始 GEMM2 输出地址。普通 CUDA Graph 更换输入重放两次也通过。真实双节点
+RDMA 与注册通信缓冲区仍待服务验证。
+
+## 2026-11-23：Qwen-Image 2.1 Ulysses 直收 PR 同步
+
+用途：将 PR #115 的 `e4c6e52` 与发布分支
+`release/sglang_v0.5.22@adcd2a5` 合并，保留目标分支的新功能及修复。
+冲突仅涉及本文的时间索引、追加记录和生成页 `architecture.html`；
+保留两边的记录，并通过 `tools/build_guide.py` 重新生成导览。
+直收实现、attention Hook 和两个注册目标相对 PR 原提交保持不变。
+
+本次在宿主 Python 3.12.6 执行 `ci/l0_gate.py`（716 Python、8 Skill）和
+导览生成/快照检查，均通过。`python3.12 -m unittest discover -s tests -v`
+对候选与未修改的 `adcd2a5` 各运行 200 项，均为 12 errors、21 skipped；
+错误测试和终端异常逐项相同，其中 10 项缺少 Torch，另 2 项为既有硬件检测
+测试替身缺少 `is_available`。全量测试未标记为通过；未新增测试错误。
+相对目标分支的 `git diff --check` 通过。
+
+本次只执行离线结构与 CPU 检查，不重新声明历史 GPU、图片精度或性能结果。
+导览模板及交互未修改，生成快照检查不代替浏览器渲染、交互和窄屏验收。

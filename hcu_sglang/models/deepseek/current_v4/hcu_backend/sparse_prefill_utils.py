@@ -202,8 +202,15 @@ def build_swa_token_ids(seq_lens: torch.Tensor, extend_seq_lens: torch.Tensor, r
         swa_offsets: (num_reqs+1,) int32, exclusive cumsum of swa_gather_lens.
     """
     if is_hcu():
-        from lightop.attention import dsv41_build_swa_token_ids
-        return dsv41_build_swa_token_ids(seq_lens, extend_seq_lens, req_pool_indices, req_to_token, full_to_swa, swa_window, total_swa)
+        try:
+            from lightop.attention import dsv41_build_swa_token_ids
+        except ImportError:
+            # Older LightOp builds do not export the fused helper.  The
+            # Triton implementation below has the same contract and remains
+            # graph safe, so keep it as the compatibility path.
+            pass
+        else:
+            return dsv41_build_swa_token_ids(seq_lens, extend_seq_lens, req_pool_indices, req_to_token, full_to_swa, swa_window, total_swa)
     assert seq_lens.dtype == torch.int32
     assert extend_seq_lens.dtype == torch.int32
     assert req_pool_indices.dtype == torch.int32

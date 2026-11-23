@@ -78,6 +78,7 @@ class Args:
     ATTENTION_BACKEND_CHOICES = ['triton']
     DRAFT_ATTENTION_BACKEND_CHOICES = ['triton']
     QUANTIZATION_CHOICES = ['fp8']
+    MOE_A2A_BACKEND_CHOICES = ['none']
     CHUNKED_PREFIX_CACHE_SUPPORTED_ATTENTION_BACKENDS = []
     ServerArgs = type('ServerArgs', (), {})
     @classmethod
@@ -91,10 +92,61 @@ for name in _HCU_QUANTIZATION_NAMES:
     assert parser.parse_args(['--quantization', name]).quantization == name
     assert Args.QUANTIZATION_CHOICES.count(name) == 1
 assert parser.parse_args(['--quantization', 'fp8']).quantization == 'fp8'
+assert Args.MOE_A2A_BACKEND_CHOICES.count('mori-das') == 1
 assert 'torch' not in sys.modules
 assert not any(name.endswith('slimquant_w4a8_marlin') for name in sys.modules)
 """
         result = subprocess.run([sys.executable, '-S', '-c', code], cwd=ROOT,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cli_choices_support_namespaced_moe_field_metadata(self):
+        code = """
+import sys
+import types
+import typing
+from typing import Annotated, Literal
+arg_utils = types.ModuleType('sglang.srt.arg_groups.arg_utils')
+class Arg:
+    def __init__(self, choices):
+        self.choices = choices
+arg_utils.Arg = Arg
+arg_utils.is_record = lambda cls: False
+arg_utils.field_names = lambda cls: set()
+arg_utils.get_type_hints = typing.get_type_hints
+sys.modules[arg_utils.__name__] = arg_utils
+arg_groups = types.ModuleType('sglang.srt.arg_groups')
+arg_groups.__path__ = []
+arg_groups.arg_utils = arg_utils
+sys.modules[arg_groups.__name__] = arg_groups
+fields = types.ModuleType('sglang.srt.arg_groups.fields')
+fields.__path__ = []
+sys.modules[fields.__name__] = fields
+exec_fields = types.ModuleType('sglang.srt.arg_groups.fields.exec_')
+metadata = Arg(['none', 'deepep'])
+class ExecMoe:
+    __annotations__ = {
+        'moe_a2a_backend': Annotated[Literal['none', 'deepep'], metadata]
+    }
+exec_fields.ExecMoe = ExecMoe
+sys.modules[exec_fields.__name__] = exec_fields
+from hcu_sglang.server_args import ensure_choices
+class Args:
+    ATTENTION_BACKEND_CHOICES = ['triton']
+    DRAFT_ATTENTION_BACKEND_CHOICES = ['triton']
+    QUANTIZATION_CHOICES = ['fp8']
+    CHUNKED_PREFIX_CACHE_SUPPORTED_ATTENTION_BACKENDS = []
+    ServerArgs = type('ServerArgs', (), {})
+    @classmethod
+    def add_chunked_prefix_cache_attention_backend(cls, name):
+        cls.CHUNKED_PREFIX_CACHE_SUPPORTED_ATTENTION_BACKENDS.append(name)
+assert ensure_choices(Args)
+assert ensure_choices(Args)
+resolved = arg_utils.get_type_hints(ExecMoe, include_extras=True)['moe_a2a_backend']
+resolved_metadata = typing.get_args(resolved)[1]
+assert resolved_metadata.choices.count('mori-das') == 1
+"""
+        result = subprocess.run([sys.executable, '-c', code], cwd=ROOT,
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

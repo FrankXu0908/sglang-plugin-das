@@ -1690,6 +1690,14 @@ def _can_use_lightop_sqrtsoftplus_gate(
     )
 
 
+def _is_mori_das_backend(backend=None) -> bool:
+    """Whether CUSTOMIZED currently denotes the pluginized MoriDAS backend."""
+    from hcu_sglang.layers.moe import mori_das
+
+    backend = get_moe_a2a_backend() if backend is None else backend
+    return mori_das.is_enabled() and backend.is_customized()
+
+
 def _can_use_lightop_moe_gate_pad_int64_fusion(
     gating_output: torch.Tensor,
     topk: int,
@@ -1703,6 +1711,7 @@ def _can_use_lightop_moe_gate_pad_int64_fusion(
         and not _use_aiter
         and not _skip_hip_pad_mask
         and get_moe_a2a_backend().is_deepep()
+        and not _is_mori_das_backend()
         and get_deepep_mode().is_low_latency()
         and num_fused_shared_experts == 0
         and topk == 6
@@ -2647,12 +2656,26 @@ def _post_process_topk_ids(
     recorder_was_fused = False
     # HCU W8A8 deployments can select DeepGEMM through the legacy env while
     # the global runner backend remains AUTO, so recognize both selectors.
+    # MoriDAS reuses DeepEPMoE through is_deepep(), but its native dispatcher
+    # requires int32 IDs. Distinguish the marker-backed CUSTOMIZED backend here
+    # so the first padding pass emits the final dtype for each dispatcher.
+    moe_a2a_backend = get_moe_a2a_backend()
+    use_deep_gemm_moe = (
+        get_moe_runner_backend().is_deep_gemm() or _use_deepgemm_moe
+    )
+    skip_mori_das_padded_tokens = (
+        _is_hcu and _is_mori_das_backend(moe_a2a_backend) and use_deep_gemm_moe
+    )
     skip_deepep_padded_tokens = (
         _is_hcu
-        and get_moe_a2a_backend().is_deepep()
-        and (get_moe_runner_backend().is_deep_gemm() or _use_deepgemm_moe)
+        and not skip_mori_das_padded_tokens
+        and moe_a2a_backend.is_deepep()
+        and use_deep_gemm_moe
     )
-    hip_deepep_postprocessed = False
+    skip_negative_id_padding = (
+        skip_deepep_padded_tokens or skip_mori_das_padded_tokens
+    )
+    hip_negative_padding_postprocessed = False
     _fold_pad_weights_into_append = False
     log2phy_prob = None
     dispatch_algorithm = (
@@ -2717,9 +2740,9 @@ def _post_process_topk_ids(
     elif _is_hip or skip_deepep_padded_tokens:
         # On AMD HIP the aiter MoE kernels do not handle topk_ids=-1 safely
         # (negative indices cause illegal memory access). Keep their padded IDs
-        # in range and zero their weights below. HCU DeepEP + DeepGEMM instead
-        # masks the final IDs to -1 after shared-expert remapping so dispatch can
-        # omit padded tokens, matching the pre-forward-port behavior.
+        # in range and zero their weights below. HCU DeepEP/MoriDAS + DeepGEMM
+        # instead masks final IDs to -1 so dispatch can omit padded routes.
+        # DeepEP emits int64 IDs; MoriDAS keeps mori::moe::index_t (int32).
         # Regression: skipping this mask when EPLB is disabled caused garbage
         # MoE routing for models like DeepSeek-R1-MXFP4 (accuracy ~0.09 vs 0.94+).
         eplb_remap_enabled = is_expert_remapping_enabled()
@@ -2743,21 +2766,20 @@ def _post_process_topk_ids(
             if lp_has_shared_cols:
                 recorder_topk_ids = dispatched_ids
             remap_info = None
-        if skip_deepep_padded_tokens and not use_per_rank_shared_slots:
-            # DeepEP disables shared-expert fusion by default. On that main HCU
-            # path no later operation can introduce another route, so remap and
-            # the final -1 padding mask can be compiled into one kernel. Emit
-            # int64 from that kernel as well because DeepEP requires int64 IDs;
-            # otherwise its dispatcher adds one copy kernel per MoE layer. Keep
-            # the post-shared-expert mask below for the explicitly forced fused
-            # shared-expert configuration.
+        if skip_negative_id_padding and not use_per_rank_shared_slots:
+            # DeepEP and MoriDAS disable shared-expert fusion by default. On
+            # that main HCU path no later operation can introduce another route,
+            # so remap, padding mask, and dtype conversion share one compiled
+            # kernel. DeepEP requests int64 IDs, while MoriDAS preserves its
+            # native int32 index type. Keep the post-shared-expert mask below
+            # for the explicitly forced fused shared-expert configuration.
             topk_ids = _biased_grouped_topk_postprocess(
                 topk_ids,
                 remap_info,
                 num_token_non_padded,
-                output_int64=True,
+                output_int64=skip_deepep_padded_tokens,
             )
-            hip_deepep_postprocessed = True
+            hip_negative_padding_postprocessed = True
         else:
             # Let append kernels materialize padded ids when remapping is disabled.
             eplb_remap_enabled = is_expert_remapping_enabled()
@@ -2769,7 +2791,11 @@ def _post_process_topk_ids(
             _fold_pad_weights_into_append = (
                 _fold_pad_into_append and not use_per_rank_shared_slots
             )
-        if not skip_deepep_padded_tokens and not _fold_pad_into_append and not padded_rows_masked:
+        if (
+            not skip_negative_id_padding
+            and not _fold_pad_into_append
+            and not padded_rows_masked
+        ):
             _mask_topk_ids_padded_region(topk_ids, num_token_non_padded, fill_value=0)
         if (
             envs.SGLANG_AITER_MEGA_EPLB_PREFILL_ONLY.get()
@@ -2799,7 +2825,7 @@ def _post_process_topk_ids(
         # the map is identity so the remap can be skipped safely.
         if (
             remap_info is not None
-            and not hip_deepep_postprocessed
+            and not hip_negative_padding_postprocessed
             and not recorder_was_fused
         ):
             topk_ids = topk_ids_logical_to_physical(topk_ids, remap_info, log2phy_prob)
@@ -2902,13 +2928,13 @@ def _post_process_topk_ids(
             fused_shared_experts_scaling_factor
         )
 
-    if skip_deepep_padded_tokens and not hip_deepep_postprocessed:
+    if skip_negative_id_padding and not hip_negative_padding_postprocessed:
         # Apply this after shared-expert remapping so every padded route,
-        # including appended shared slots, is omitted by DeepEP dispatch.
+        # including appended shared slots, is omitted by DeepEP/MoriDAS.
         _mask_topk_ids_padded_region(topk_ids, num_token_non_padded, fill_value=-1)
     elif (
         _is_hip
-        and not skip_deepep_padded_tokens
+        and not skip_negative_id_padding
         and not _skip_hip_pad_mask
         and not _fold_pad_weights_into_append
         and not padded_rows_masked

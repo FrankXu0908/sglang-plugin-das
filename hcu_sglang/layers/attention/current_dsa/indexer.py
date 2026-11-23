@@ -10,7 +10,6 @@ from sglang.srt.layers.attention.dsa.dsa_indexer import (
     BaseFusedOp,
     BaseIndexerMetadata,
     DSANPUIndexerMixin,
-    DSAPagedMQALogitsBackend,
     DSA_DENSE,
     DUAL_STREAM_TOKEN_THRESHOLD,
     Dict,
@@ -92,7 +91,7 @@ from sglang.srt.layers.attention.dsa.dsa_indexer import (
 from sglang.srt.utils import get_bool_env_var
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.layers.attention.dsa.utils import aiter_can_use_preshuffle_paged_mqa
-from hcu_sglang.layers.attention.current_dsa.paged_mqa_logits_backend import DSAPagedMQALogitsBackend
+from hcu_sglang.layers.attention.current_dsa.paged_mqa_logits_backend import DSAPagedMQALogitsBackend, use_native_paged_mqa_schedule
 from hcu_sglang.utils.detection import is_hcu, is_hcu_native_fp8_supported
 _is_hcu = is_hcu()
 _HCU_MQA_REQUEST_SPLIT_LOGGED = False
@@ -1529,9 +1528,7 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                 seqlens_32_2d = seqlens_32.reshape(-1).contiguous().view(-1, 1)
         else:
             seqlens_32_2d = seqlens_32.contiguous().view(-1, 1)
-        if _is_cuda and not (
-            _is_hcu and envs.SGLANG_HCU_GLM53_FP8_DECODE_NATIVE_OPS.get()
-        ):
+        if _is_cuda and not (_is_hcu and use_native_paged_mqa_schedule()):
             if schedule_metadata is None:
                 schedule_metadata = resolve_paged_mqa_logits_metadata_fn()(
                     seqlens_32_2d, blocksize, self.sm_count

@@ -48,7 +48,7 @@ def register() -> None:
     from hcu_sglang.layers.attention.fla import l2norm
     from hcu_sglang.layers.attention.linear import gdn_backend
     from hcu_sglang.layers import norm_activation, quantization, linear_fusion, layer_boundary, rotary
-    from hcu_sglang.layers.moe import alignment, aiter_w4a8, lightop_runner, mega_moe, topk, standard_dispatcher
+    from hcu_sglang.layers.moe import alignment, aiter_w4a8, lightop_runner, mega_moe, mori_das, topk, standard_dispatcher
     from hcu_sglang.mem_cache import allocation as mem_cache_allocation
     from hcu_sglang.mem_cache import (
         dsa,
@@ -160,6 +160,7 @@ def register() -> None:
     kv_events.register_hooks()
     kv_event_admission.register_hooks()
     standard_dispatcher.register_hooks()
+    mori_das.register_hooks()
     alignment.register_hooks()
     from hcu_sglang.utils.detection import is_hcu
     if is_hcu():

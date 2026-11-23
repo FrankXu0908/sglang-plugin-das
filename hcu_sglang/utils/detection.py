@@ -21,8 +21,12 @@ def is_hcu() -> bool:
     try:
         props = torch.cuda.get_device_properties(0)
         gcn_arch = getattr(props, "gcnArchName", "")
+        if not gcn_arch:
+            raise RuntimeError("HIP returned an empty gcnArchName for device 0")
         return any(gfx in gcn_arch for gfx in _SUPPORTED_ARCHS)
     except Exception as e:
+        if torch.cuda.is_available():
+            raise RuntimeError("Cannot determine the architecture of visible HIP device 0") from e
         logger.warning("HCU detection failed: %s", e)
         return False
 

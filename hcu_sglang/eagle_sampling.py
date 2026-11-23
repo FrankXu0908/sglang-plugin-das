@@ -30,12 +30,19 @@ def _use_native_target_sampling(verify_input, batch, kwargs):
     from sglang.srt.configs.model_config import is_glm_moe_dsa
     from sglang.srt.runtime_context import get_model, get_spec, process_model_config
 
-    return (
-        is_hcu()
-        and not get_spec().speculative_use_rejection_sampling
-        and is_glm_moe_dsa(process_model_config().hf_config)
-        and get_model().quantization in ("compressed-tensors", "compressed_tensors")
-    )
+    if not is_hcu() or get_spec().speculative_use_rejection_sampling:
+        return False
+    model_config = process_model_config()
+    if not is_glm_moe_dsa(model_config.hf_config):
+        return False
+    quantization = get_model().quantization
+    if quantization is None:
+        from hcu_sglang.layers.attention.hisparse import _matches_channel_fp8
+
+        if not _matches_channel_fp8(model_config.hf_config):
+            return False
+        quantization = model_config.quantization
+    return quantization in ("compressed-tensors", "compressed_tensors")
 
 
 def around_eagle_sample(original, verify_input, batch, logits_output, *args, **kwargs):
@@ -58,15 +65,29 @@ def around_verify_policy(original, **kwargs):
 
 def around_verify_tree_greedy(original, *args, **kwargs):
     context = _sample_context.get()
-    if context is not None:
-        verify_input, sampling_info, logits_output = context
-        kwargs["target_predict"] = sample_mtp_target_ids(
-            logits_output.next_token_logits,
-            sampling_info,
-            verify_input.draft_token_num,
-            verify_input.positions,
-        ).reshape(kwargs["candidates"].shape)
-    return original(*args, **kwargs)
+    if context is None:
+        return original(*args, **kwargs)
+    verify_input, sampling_info, logits_output = context
+    kwargs["target_predict"] = sample_mtp_target_ids(
+        logits_output.next_token_logits,
+        sampling_info,
+        verify_input.draft_token_num,
+        verify_input.positions,
+    ).reshape(kwargs["candidates"].shape)
+    result = original(*args, **kwargs)
+
+    from sglang.srt.speculative import eagle_utils
+
+    if not eagle_utils._is_hip:
+        from sglang.srt.layers.dp_attention import is_dp_attention_enabled
+        from sglang.srt.runtime_context import get_parallel
+
+        parallel = get_parallel()
+        group = parallel.attn_tp_group if is_dp_attention_enabled() else parallel.tp_group
+        if group.world_size > 1:
+            for tensor in result:
+                group.broadcast(tensor, src=0)
+    return result
 
 
 def sample_mtp_target_ids(

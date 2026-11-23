@@ -5,9 +5,17 @@ from __future__ import annotations
 
 from enum import Enum
 
+from sglang.srt.environ import envs
 from sglang.srt.runtime_context import get_platform
 from sglang.srt.utils import is_hip
 from hcu_sglang.utils.detection import is_hcu as is_hcu
+
+
+def use_native_paged_mqa_schedule() -> bool:
+    override = envs.SGLANG_HCU_LIGHTOP_PAGED_MQA_NATIVE_SCHEDULE.get()
+    if override is None:
+        return envs.SGLANG_HCU_GLM53_FP8_DECODE_NATIVE_OPS.get()
+    return override
 
 
 class DSAPagedMQALogitsBackend(Enum):

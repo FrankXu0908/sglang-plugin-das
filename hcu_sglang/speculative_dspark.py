@@ -50,7 +50,12 @@ def _handle_dspark(server_args: ServerArgs) -> None:
     if cfg.attn_dp_size > 1 and not pd_prefill_cp:
         if not cfg.enable_dp_lm_head:
             raise ValueError("DSpark with dp attention requires --enable-dp-lm-head.")
-        supports_target_moe = cfg.moe_a2a_backend in ("none", "megamoe", "mori") or (
+        supports_target_moe = cfg.moe_a2a_backend in (
+            "none",
+            "megamoe",
+            "mori",
+            "mori-das",
+        ) or (
             cfg.moe_a2a_backend == "deepep"
             # HCU serves DeepEP with its own runners (marlin/aiter/...).
             and (_is_hcu_device or cfg.moe_runner_backend == "deep_gemm")
@@ -58,7 +63,7 @@ def _handle_dspark(server_args: ServerArgs) -> None:
         if not _is_npu and not supports_target_moe:
             raise ValueError(
                 "DSpark with dp attention supports MoE A2A 'none', 'megamoe', "
-                "'mori', or 'deepep' with runner 'deep_gemm'; got "
+                "'mori', 'mori-das', or 'deepep' with runner 'deep_gemm'; got "
                 f"a2a={cfg.moe_a2a_backend!r}, runner={cfg.moe_runner_backend!r}."
             )
         if not _is_npu and (
@@ -85,12 +90,18 @@ def _handle_dspark(server_args: ServerArgs) -> None:
             if cfg.speculative_moe_runner_backend is not None
             else cfg.moe_runner_backend
         )
-        supports_draft_moe = draft_a2a in ("none", "megamoe", "mori") or (
+        supports_draft_moe = draft_a2a in (
+            "none",
+            "megamoe",
+            "mori",
+            "mori-das",
+        ) or (
             draft_a2a == "deepep" and (_is_hcu_device or draft_runner == "deep_gemm")
         )
         if not supports_draft_moe:
             raise ValueError(
                 "DSpark draft MoE A2A only supports 'none', 'megamoe', 'mori', "
+                "'mori-das', "
                 "or 'deepep' with runner 'deep_gemm'; got "
                 f"a2a={draft_a2a!r}, runner={draft_runner!r}."
             )

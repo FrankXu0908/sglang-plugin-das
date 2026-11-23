@@ -96,7 +96,30 @@ def around_mega_moe_pre_dispatch(original, *args, **kwargs):
     return mega_moe_pre_dispatch(*args, **kwargs)
 
 
+def around_fused_moe_kernel_sequence(original, *args, **kwargs):
+    """Use the HIP-safe DSV4 SwiGLU clamp path for non-EP MoE.
+
+    Upstream uses ``filter_expert=False`` when every expert is local.  Its
+    non-filtered DSV4 clamp kernel is CUDA/XPU-only, while the filtered Triton
+    activation path is supported on HCU and is equivalent when the local
+    expert range covers all experts.  EP decode already has
+    ``filter_expert=True`` and is therefore unchanged.
+    """
+    if (
+        _is_hcu
+        and kwargs.get("swiglu_limit") is not None
+        and kwargs.get("filter_expert") is False
+    ):
+        kwargs["filter_expert"] = True
+    return original(*args, **kwargs)
+
+
 def register_hooks():
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
     for name, hook in [("hash_topk", around_hash_topk), ("mega_moe_pre_dispatch", around_mega_moe_pre_dispatch)]:
         HookRegistry.register("sglang.kernels.ops.moe.dsv4." + name, hook, HookType.AROUND)
+    HookRegistry.register(
+        "sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe._fused_moe_kernel_sequence",
+        around_fused_moe_kernel_sequence,
+        HookType.AROUND,
+    )

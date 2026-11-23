@@ -231,7 +231,17 @@ def after_capture_prepare(result, runner, *args, **kwargs):
 def register_hooks():
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
+    from .hisparse_spec import around_spec_init, around_spec_load
+
     for target, hook in (
+        (
+            "sglang.srt.managers.hisparse_coordinator.HiSparseSpecSwapManager.__init__",
+            around_spec_init,
+        ),
+        (
+            "sglang.srt.managers.hisparse_coordinator.load_cache_to_device_buffer_spec_mla",
+            around_spec_load,
+        ),
         (
             "sglang.srt.arg_groups.model_hook._dsa_split_backend_resolution",
             around_backend_resolution,

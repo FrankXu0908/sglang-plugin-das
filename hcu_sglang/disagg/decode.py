@@ -911,7 +911,9 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                     kv_args.host_state_item_lens,
                 ) = ([values] for values in host_state)
         if isinstance(self.token_to_kv_pool, DeepSeekV4TokenToKVPool):
-            from sglang.srt.mem_cache.cp_cache_layer_split.transfer import (
+            # Keep this helper plugin-owned: it type-checks the plugin V4 pool
+            # and emits the plugin PD transfer metadata ABI.
+            from hcu_sglang.mem_cache.cp_cache_layer_split.transfer import (
                 configure_v4_transfer,
             )
 

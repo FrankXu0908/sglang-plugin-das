@@ -92,6 +92,7 @@ from sglang.kernels.ops.attention.fixup_zero_kv import fixup_zero_kv_rows
 from sglang.kernels.ops.attention.dsa.triton_kernel import get_valid_kv_indices
 from sglang.kernels.ops.quantization.fp8_kernel import fp8_dtype
 from hcu_sglang.layers.attention.current_dsa.dsa_topk_backend import DSATopKBackend, TopkTransformMethod
+from hcu_sglang.layers.attention.current_dsa.paged_mqa_logits_backend import use_native_paged_mqa_schedule
 from hcu_sglang.utils.detection import is_hcu
 _is_hcu = is_hcu()
 if _is_hcu:
@@ -928,7 +929,7 @@ class DeepseekSparseAttnBackend(
         metadata: DSAMetadata,
         seqlens_32_2d: torch.Tensor,
     ) -> None:
-        if _is_hcu and envs.SGLANG_HCU_GLM53_FP8_DECODE_NATIVE_OPS.get():
+        if _is_hcu and use_native_paged_mqa_schedule():
             return
         new_schedule = resolve_paged_mqa_logits_metadata_fn()(
             seqlens_32_2d, 64, resolve_num_sms()
@@ -1370,9 +1371,7 @@ class DeepseekSparseAttnBackend(
 
         paged_mqa_schedule_metadata = None
         paged_mqa_ctx_lens_2d = None
-        if is_cuda() and not (
-            _is_hcu and envs.SGLANG_HCU_GLM53_FP8_DECODE_NATIVE_OPS.get()
-        ) and (
+        if is_cuda() and not (_is_hcu and use_native_paged_mqa_schedule()) and (
             forward_mode.is_decode_or_idle()
             or forward_mode.is_target_verify()
             or forward_mode.is_draft_extend_v2()
@@ -1786,9 +1785,7 @@ class DeepseekSparseAttnBackend(
 
         paged_mqa_schedule_metadata = None
         paged_mqa_ctx_lens_2d = None
-        if is_cuda() and not (
-            _is_hcu and envs.SGLANG_HCU_GLM53_FP8_DECODE_NATIVE_OPS.get()
-        ) and (
+        if is_cuda() and not (_is_hcu and use_native_paged_mqa_schedule()) and (
             forward_mode.is_decode_or_idle()
             or forward_mode.is_target_verify()
             or forward_mode.is_draft_extend_v2()

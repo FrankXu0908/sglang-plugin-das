@@ -167,8 +167,8 @@ class W8A8RunnerDispatchTests(unittest.TestCase):
         aiter_arm.assert_not_called()
 
     def test_compressed_process_weights_chains_deepep_then_lightop(self):
-        import sys
         import types
+        from hcu_sglang.layers import moe
         from hcu_sglang.layers.quantization import w8a8_lightop
         from hcu_sglang.layers.quantization import w8a8_runner_dispatch
 
@@ -189,7 +189,7 @@ class W8A8RunnerDispatchTests(unittest.TestCase):
         fake_deepep = types.ModuleType("hcu_sglang.layers.moe.deepep_fp8")
         fake_deepep.around_process_weights = deepep_arm
         with (
-            patch.dict(sys.modules, {"hcu_sglang.layers.moe.deepep_fp8": fake_deepep}),
+            patch.object(moe, "deepep_fp8", fake_deepep, create=True),
             patch.object(w8a8_lightop, "around_compressed_process_weights", lightop_arm),
         ):
             w8a8_runner_dispatch.around_compressed_process_weights(
