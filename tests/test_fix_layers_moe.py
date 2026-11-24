@@ -91,7 +91,7 @@ class LayerMoeFixTests(unittest.TestCase):
         layer.quant_method = scheme
         layer.moe_runner_config = SimpleNamespace(activation="silu", swiglu_limit=None)
         layer.deepep_mode = SimpleNamespace(is_normal=lambda: False)
-        with patch.dict(os.environ, {"SGLANG_USE_DEEPGEMM_MOE": "1"}), patch.object(I, "use_int8_deepgemm_asm", return_value=True), patch.object(I, "is_hcu_gfx936", return_value=False):
+        with patch.dict(os.environ, {"SGLANG_USE_DEEPGEMM_MOE": "1"}), patch.object(I, "use_int8_deepgemm_asm", return_value=True), patch.object(I, "is_hcu_pair32_int8", return_value=False):
             I.configure_layer(layer, None)
         self.assertTrue(layer.use_int8_w8a8_deepgemm)
         mode = SimpleNamespace(is_normal=lambda: False, enable_normal=lambda: True, enable_low_latency=lambda: True)

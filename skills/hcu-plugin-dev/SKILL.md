@@ -69,3 +69,5 @@ KV 事件/LoRA 名称迁移按 [namespace 的生产与消费](references/test-co
 Rust crate 或 token hash 迁移按 [provider、事件 ABI 与宽 token hash](references/test-contract.md#rust-provider事件-abi-与宽-token-hash) 配对预检/loader、编译资产与真实 tuple 生产消费，并验证跨语言编码和 eviction ownership。
 
 GLM5.2 INT4 的专项复现输入、脚本与验证边界见 [适配与0518对照](../../docs/glm52-int4-adaptation.md)。历史组合性能不作为新分支或其他硬件的默认验收结果。
+
+GLM5.2 Channel FP8 的专项输入、已有 RoPE 配方和本次证据范围见 [FP8 适配记录](../../docs/glm52-fp8-adaptation.md)。

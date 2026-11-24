@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 import os
 import unittest
@@ -16,6 +19,82 @@ from sglang.srt.plugins.hook_registry import HookRegistry
 
 
 class CompressedInt8Tests(unittest.TestCase):
+    def test_pair32_auto_and_low_latency_match_public_gemm_layouts(self):
+        from deepgemm import group_gemm_weight_pack as packing
+        from hcu_sglang.layers.quantization import hcu_deepgemm_w8a8_utils as U
+        for arch in ("gfx936", "gfx938"):
+            for normal in (True, False):
+                with self.subTest(arch=arch, normal=normal):
+                    layer = torch.nn.Module()
+                    originals = [((torch.arange(2 * 256 * k).reshape(2, 256, k) % 127) - 63).to(torch.int8) for k in (256, 128)]
+                    layer.w13_weight = torch.nn.Parameter(originals[0].clone(), requires_grad=False)
+                    layer.w2_weight = torch.nn.Parameter(originals[1].clone(), requires_grad=False)
+                    mode = SimpleNamespace(is_normal=lambda: False, enable_normal=lambda: normal, enable_low_latency=lambda: True)
+                    with patch.object(U, "get_hcu_gfx_arch", return_value=arch), patch.object(
+                        U, "use_int8_deepgemm_asm", return_value=False
+                    ), patch("sglang.srt.layers.moe.utils.get_deepep_mode", return_value=mode), patch.object(
+                        packing, "pack_i8_weight_pair32", wraps=packing.pack_i8_weight_pair32
+                    ) as packing_call, patch.object(torch.cuda, "is_available", return_value=False):
+                        U.prepare_w8a8_int8_deepgemm_weights(layer)
+                        U.prepare_w8a8_int8_deepgemm_weights(layer)
+                    self.assertEqual(packing_call.call_count, 2)
+                    self.assertFalse(hasattr(layer, "w13_weight"))
+                    self.assertEqual(layer.w13_weight_deepgemm_masked.shape, (2, 4, 8, 2, 4, 16, 16))
+                    self.assertEqual(layer.w2_weight_deepgemm_masked.shape, (2, 2, 8, 2, 4, 16, 16))
+                    for original, packed in zip(originals, (layer.w13_weight_deepgemm_masked, layer.w2_weight_deepgemm_masked)):
+                        for e, n, k in ((0, 0, 0), (0, 1, 17), (0, 10, 63), (1, 31, 64), (1, 255, 127)):
+                            index = (e, k // 64, n // 32, n % 2, k // 16 % 4, n // 2 % 4 * 4 + n // 8 % 4, k % 16)
+                            self.assertEqual(packed[index].item(), original[e, n, k].item())
+                    if normal:
+                        self.assertIs(layer.w13_weight_deepgemm, layer.w13_weight_deepgemm_masked)
+                        self.assertIs(layer.w2_weight_deepgemm, layer.w2_weight_deepgemm_masked)
+                    else:
+                        self.assertFalse(hasattr(layer, "w13_weight_deepgemm"))
+                    self.assertEqual(layer._w8a8_int8_deepgemm_has_contiguous, normal)
+                    self.assertTrue(layer._w8a8_int8_deepgemm_has_masked)
+
+    def test_pair32_selection_preserves_explicit_asm_and_other_architectures(self):
+        from hcu_sglang.layers.moe import deepep_int8 as M
+        from hcu_sglang.layers.quantization import hcu_deepgemm_w8a8_utils as U
+        for arch in ("gfx936", "gfx938", "gfx928"):
+            for asm in (False, True):
+                with self.subTest(arch=arch, asm=asm), patch.object(U, "get_hcu_gfx_arch", return_value=arch), patch.object(
+                    M, "use_int8_deepgemm_asm", return_value=asm
+                ), patch("hcu_sglang.utils.detection.is_hcu", return_value=True), patch.dict(
+                    os.environ, {"SGLANG_USE_DEEPGEMM_MOE": "1"}
+                ):
+                    layer = SimpleNamespace()
+                    M.configure_layer(layer, M.W8A8Int8Config())
+                    self.assertTrue(layer.use_int8_w8a8_deepgemm)
+                    self.assertEqual(layer.use_int8_w8a8_deepgemm_asm, asm)
+                    self.assertEqual(layer.use_pair32_w8a8_int8_deepgemm, arch in ("gfx936", "gfx938") and not asm)
+
+    def test_masked_int8_ffn_uses_pair32_for_both_matrix_products(self):
+        import deepgemm
+        from hcu_sglang.layers.moe import deepep_int8 as M
+        layer = SimpleNamespace(
+            quant_method=object(), moe_runner_config=SimpleNamespace(activation="silu", swiglu_limit=None),
+            use_int8_w8a8_deepgemm_asm=False, use_pair32_w8a8_int8_deepgemm=True,
+            w13_weight_scale=torch.ones(2, 16, 1), w2_weight_scale=torch.ones(2, 8, 1),
+            w13_weight_deepgemm_masked=torch.ones(2, 16, 8, dtype=torch.int8),
+            w2_weight_deepgemm_masked=torch.ones(2, 8, 8, dtype=torch.int8),
+        )
+        x, scales, counts = torch.ones(2, 4, 8, dtype=torch.int8), torch.ones(2, 4, 1), torch.tensor([1, 3], dtype=torch.int32)
+        calls = []
+        def gemm(a, b, output, masked_m, expected_m, **kwargs):
+            calls.append((a, b, masked_m, expected_m, kwargs))
+            output.fill_(2)
+        with patch.object(deepgemm, "m_grouped_i8_gemm_nt_masked", side_effect=gemm), patch.object(
+            torch.ops.sglang, "fuse_silu_mul_quant_ep", return_value=(x, scales)
+        ):
+            output = M.forward_groupgemm_w8a8_int8_masked(layer, (x, scales, None, None, counts, 9))
+        self.assertEqual(len(calls), 2)
+        self.assertIs(calls[0][1][0], layer.w13_weight_deepgemm_masked)
+        self.assertIs(calls[1][1][0], layer.w2_weight_deepgemm_masked)
+        self.assertEqual([call[3] for call in calls], [4, 4])
+        self.assertTrue(all(call[4] == {"shuffle_unique": 0} for call in calls))
+        torch.testing.assert_close(output, torch.full((2, 4, 8), 2, dtype=torch.bfloat16))
+
     @classmethod
     def setUpClass(cls):HookRegistry.reset();H.register_hooks();HookRegistry.apply_hooks()
 

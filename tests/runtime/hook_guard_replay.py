@@ -5,11 +5,13 @@
 """Replay the 2026-11-09 startup hook targets against the real HookRegistry.
 
 Registers exactly the 15 targets that failed during that PD run (plus one
-resolvable control) and compares unguarded vs guarded ``apply_hooks()``:
+resolvable control) and compares unguarded vs guarded ``apply_hooks()``.
+Which of the 15 a build actually lacks varies (a build with the multimodal
+pipelines resolves 14 of them), so the outcome is read target by target:
 
-* unguarded: one ERROR record (with traceback) per failing target;
-* guarded:   zero ERROR records, one INFO summary naming every skipped target,
-             and the control target still patched.
+* unguarded: one ERROR record (with traceback) per target the build lacks;
+* guarded:   zero ERROR records, summary lines naming exactly those skipped
+             targets, and the control target still patched.
 
 Usage:
     python tests/runtime/hook_guard_replay.py --sglang-python <path/to/sglang/python>
@@ -58,6 +60,12 @@ def load_real_registry(python_root: Path):
     module.__file__ = str(source)
     sys.modules["sglang.srt.plugins.hook_registry"] = module
     exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), module.__dict__)
+    # hook_guard.install() reaches the registry with ``from sglang.srt.plugins
+    # import hook_registry``, which reads the attribute off the parent package
+    # before sys.modules. Where the installed sglang is already imported (an
+    # image whose startup loads the plugins), that attribute still names the
+    # installed registry and the guard would land on one this replay never drives.
+    sys.modules["sglang.srt.plugins"].hook_registry = module
     return module
 
 
@@ -105,21 +113,29 @@ def run(module, use_guard: bool):
 
     errors = [r for r in collector.records if r.levelno >= logging.ERROR]
     summaries = [
-        r
+        r.getMessage()
         for r in collector.records
         if r.levelno in (logging.INFO, logging.WARNING)
         and "hcu hook guard: skipped" in r.getMessage()
     ]
     patched = CONTROL_TARGET in HookRegistry._patched
-    # Every failed target is also logged once as "Failed to apply hooks to".
-    failed_lines = [
-        r for r in collector.records if "Failed to apply hooks to" in r.getMessage()
+    # Every target the build lacks is also logged once as "Failed to apply hooks to".
+    failed = [
+        record.getMessage().partition("Failed to apply hooks to ")[2]
+        for record in collector.records
+        if "Failed to apply hooks to " in record.getMessage()
+    ]
+    # One summary line per failure kind, the targets follow the reason.
+    skipped = [
+        target
+        for message in summaries
+        for target in message.partition("): ")[2].split(", ")
     ]
     return {
         "errors": len(errors),
-        "failed_lines": len(failed_lines),
-        "summaries": len(summaries),
-        "summary_text": summaries[0].getMessage() if summaries else "",
+        "failed": failed,
+        "summaries": summaries,
+        "skipped": skipped,
         "patched": patched,
     }
 
@@ -147,25 +163,34 @@ def main() -> int:
         root.handlers = saved_handlers
 
     print("\n=== unguarded (what the 2026-11-09 logs show) ===")
-    print("  'Failed to apply hooks' lines :", before["failed_lines"])
+    print("  'Failed to apply hooks' lines :", len(before["failed"]))
     print("  ERROR records with traceback  :", before["errors"])
     print("  control target patched        :", before["patched"])
+    for target in before["failed"]:
+        print("    -", target)
 
     print("\n=== guarded ===")
-    print("  'Failed to apply hooks' lines :", after["failed_lines"])
+    print("  'Failed to apply hooks' lines :", len(after["failed"]))
     print("  ERROR records with traceback  :", after["errors"])
-    print("  INFO summary lines            :", after["summaries"])
+    print("  summary lines                 :", len(after["summaries"]))
     print("  control target patched        :", after["patched"])
-    print("\n  summary:", after["summary_text"])
+    for message in after["summaries"]:
+        print("\n  summary:", message)
 
+    # What this build lacks is what the replay guards: every target that fails
+    # unguarded must be one of the 15 and be skipped guarded, and nothing else.
+    failed = before["failed"]
+    if not failed:
+        print("\n  this build has all 15 targets; nothing to replay")
     ok = (
-        before["errors"] == len(FAILED_TARGETS)
-        and before["failed_lines"] == len(FAILED_TARGETS)
+        bool(failed)
+        and set(failed) <= set(FAILED_TARGETS)
+        and len(set(failed)) == len(failed) == before["errors"]
         and after["errors"] == 0
-        and after["failed_lines"] == 0
-        and after["summaries"] == 1
+        and not after["failed"]
+        and sorted(after["skipped"]) == sorted(failed)
+        and before["patched"]
         and after["patched"]
-        and all(t in after["summary_text"] for t in FAILED_TARGETS)
     )
     print("\nRESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1

@@ -25,6 +25,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from sglang.srt.layers.dp_attention import is_dp_attention_enabled
+from sglang.srt.layers.layer_boundary import layer_stack
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
@@ -35,7 +36,8 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 )
 from sglang.srt.managers.schedule_batch import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from hcu_sglang.models.hunyuan_v3 import HYV3DecoderLayer
+from sglang.srt.models.hunyuan_v3 import HYV3DecoderLayer
+from sglang.srt.models import hunyuan_v3_nextn as native_hunyuan_v3_nextn
 from sglang.srt.runtime_context import get_exec, get_parallel, get_stream
 from sglang.srt.utils import is_cuda
 
@@ -49,7 +51,7 @@ class HYV3ModelNextN(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
         self.config = config
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -69,14 +71,17 @@ class HYV3ModelNextN(nn.Module):
         # layer_id=0 pick a dense MLP instead of MoE, so override it.
         orig_first_k = getattr(config, "first_k_dense_replace", 0)
         config.first_k_dense_replace = 0
-        self.decoder = HYV3DecoderLayer(
-            config=config,
-            layer_id=0,
-            quant_config=quant_config,
-            prefix=f"{prefix}.decoder",
-            alt_stream=self.alt_stream,
-        )
-        config.first_k_dense_replace = orig_first_k
+        try:
+            with layer_stack():
+                self.decoder = HYV3DecoderLayer(
+                    config=config,
+                    layer_id=0,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.decoder",
+                    alt_stream=self.alt_stream,
+                )
+        finally:
+            config.first_k_dense_replace = orig_first_k
 
         self.shared_head = nn.Module()
         self.shared_head.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -130,7 +135,7 @@ class HYV3ForCausalLMNextN(nn.Module):
         self.config = config
         self.quant_config = quant_config
 
-        self.model = HYV3ModelNextN(config, quant_config, prefix="model")
+        self.model = native_hunyuan_v3_nextn.HYV3ModelNextN(config, quant_config, prefix="model")
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,

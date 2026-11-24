@@ -95,3 +95,5 @@
 / 函数换绑 / 配置与环境键类问题去 adapter 仓（从其 `docs/reading-guide.md`
 进入）；新增能力经 §0 判定落本仓后回到 [工程初始化](first-plugin.md) 或
 [能力开发](plugins.md)。
+
+GLM5.2 Channel FP8 配方、MQA planner 接线和固定组合验证见 [FP8 适配记录](glm52-fp8-adaptation.md)。

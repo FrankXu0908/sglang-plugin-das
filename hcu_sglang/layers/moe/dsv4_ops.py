@@ -7,6 +7,7 @@ from hcu_sglang.utils.detection import is_hcu
 
 _is_hcu = is_hcu()
 _jit_hash_topk_module = N._jit_hash_topk_module
+_jit_mask_topk_module = N._jit_mask_topk_module
 _jit_mega_moe_pre_dispatch_module = N._jit_mega_moe_pre_dispatch_module
 
 
@@ -40,6 +41,9 @@ def hash_topk(
         topk_weights = torch.empty(
             (num_tokens, topk_fused), dtype=torch.float32, device=router_logits.device
         )
+        if num_tokens == 0:
+            # Nothing to route; the runtime rejects a launch with no blocks.
+            return topk_weights, topk_ids
         module = _jit_hash_topk_module()
         module.hash_topk(
             router_logits,
@@ -50,6 +54,13 @@ def hash_topk(
             routed_scaling_factor,
         )
         return topk_weights, topk_ids
+
+
+def mask_topk_ids(topk_ids: torch.Tensor, num_token_non_padded: torch.Tensor):
+    if topk_ids.size(0) == 0:
+        # Nothing to mask; the runtime rejects a launch with no blocks.
+        return None
+    return _jit_mask_topk_module().run(topk_ids, num_token_non_padded)
 
 
 def mega_moe_pre_dispatch(
@@ -90,6 +101,12 @@ def around_hash_topk(original, *args, **kwargs):
     return hash_topk(*args, **kwargs)
 
 
+def around_mask_topk_ids(original, *args, **kwargs):
+    if not is_hcu():
+        return original(*args, **kwargs)
+    return mask_topk_ids(*args, **kwargs)
+
+
 def around_mega_moe_pre_dispatch(original, *args, **kwargs):
     if not is_hcu():
         return original(*args, **kwargs)
@@ -116,7 +133,11 @@ def around_fused_moe_kernel_sequence(original, *args, **kwargs):
 
 def register_hooks():
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
-    for name, hook in [("hash_topk", around_hash_topk), ("mega_moe_pre_dispatch", around_mega_moe_pre_dispatch)]:
+    for name, hook in [
+        ("hash_topk", around_hash_topk),
+        ("mask_topk_ids", around_mask_topk_ids),
+        ("mega_moe_pre_dispatch", around_mega_moe_pre_dispatch),
+    ]:
         HookRegistry.register("sglang.kernels.ops.moe.dsv4." + name, hook, HookType.AROUND)
     HookRegistry.register(
         "sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe._fused_moe_kernel_sequence",

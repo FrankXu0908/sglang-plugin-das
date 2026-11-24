@@ -1,5 +1,8 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import sys
 import unittest
 import torch
@@ -8,10 +11,88 @@ bootstrap_aiter_compat()
 from hcu_sglang.environ import register_envs
 register_envs()
 from hcu_sglang.models.qwen import qwen2 as Q2, qwen3 as Q3, qwen3_source as S3
-from hcu_sglang.layers.attention import hcu_mla_backend as MLA, hcu_mla_utils as MU
 from hcu_sglang.models.deepseek.deepseek_common.methods import weight_loader as WL
 
 class AttentionModelParityTests(unittest.TestCase):
+    def test_hy3_int8_rope_matches_legacy_cache_precision(self):
+        from hcu_sglang.models import hunyuan_v3 as H
+        from sgl_kernel.rotary import rotary_embedding
+
+        cache = torch.tensor([[0.12345, 0.98765, 0.45678, 0.76543],
+                              [0.87654, 0.23456, 0.65432, 0.34567]])
+        values = torch.arange(24, dtype=torch.bfloat16).reshape(2, 12) / 7
+        positions = torch.tensor([0, 1])
+        class Rotary:
+            is_neox_style = True
+            def __init__(self):
+                self.cos_sin_cache = cache.clone()
+            def __call__(self, positions, q, k):
+                rotary_embedding(positions, q, k, 4, self.cos_sin_cache, True)
+                return q, k
+        rotary = Rotary()
+        original_cache = rotary.cos_sin_cache
+        for hcu, dtype in ((True, torch.int8), (True, torch.bfloat16),
+                           (True, torch.float8_e4m3fn), (False, torch.int8)):
+            with self.subTest(hcu=hcu, weight_dtype=dtype):
+                x = values.clone()
+                qkv = Mock(return_value=(x, None))
+                qkv.weight = torch.empty(1, dtype=dtype)
+                model = NS(hy3_sp=False, qkv_proj=qkv, use_hpc_ops_fp8_attn=False,
+                           q_size=4, kv_size=4, use_qk_norm=False, head_dim=4,
+                           rotary_emb=rotary, attn=Mock(side_effect=lambda q,k,v,b,**kw:q),
+                           o_proj=lambda value:(value, None))
+                trig = cache.to(torch.bfloat16).float() if hcu and dtype == torch.int8 else cache
+                a, b = values[:, :2].float(), values[:, 2:4].float()
+                cos, sin = trig[:, :2], trig[:, 2:]
+                expected = torch.cat((a*cos-b*sin, a*sin+b*cos), dim=-1).to(torch.bfloat16)
+                with patch.object(H, '_is_hcu', hcu), patch.object(H, '_use_fused_hunyuan_rotary', False):
+                    actual = H.HYV3Attention.forward(model, positions, x, NS())
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                self.assertIs(rotary.cos_sin_cache, original_cache)
+                torch.testing.assert_close(rotary.cos_sin_cache, cache, rtol=0, atol=0)
+
+    def test_hy3_int8_rope_reuses_private_cache_and_refreshes_replaced_source(self):
+        from hcu_sglang.models import hunyuan_v3 as H
+
+        from sgl_kernel.rotary import rotary_embedding
+
+        class Rotary:
+            is_neox_style = True
+            cos_sin_cache = torch.tensor([[0.12345, 0.98765, 0.45678, 0.76543]])
+
+        rotary = Rotary()
+        qkv = Mock()
+        qkv.weight = torch.empty(1, dtype=torch.int8)
+        model = NS(hy3_sp=False, qkv_proj=qkv, use_hpc_ops_fp8_attn=False,
+                   q_size=4, kv_size=4, use_qk_norm=False, head_dim=4,
+                   rotary_emb=rotary, attn=Mock(side_effect=lambda q,k,v,b,**kw:q),
+                   o_proj=lambda value:(value, None))
+        previous = None
+        for dtype, replace_source in ((torch.bfloat16, False), (torch.bfloat16, False),
+                                      (torch.float16, False), (torch.float16, True)):
+            if replace_source:
+                rotary.cos_sin_cache = rotary.cos_sin_cache + 0.01
+            source = rotary.cos_sin_cache
+            x = torch.arange(12, dtype=dtype).reshape(1, 12) / 7
+            qkv.return_value = (x.clone(), None)
+            expected_q, expected_k = x[:, :4].clone(), x[:, 4:8].clone()
+            rotary_embedding(torch.tensor([0]), expected_q, expected_k, 4,
+                             source.to(dtype=dtype), True)
+            with patch.object(H, '_is_hcu', True), patch.object(H, '_use_fused_hunyuan_rotary', False):
+                actual = H.HYV3Attention.forward(model, torch.tensor([0]), x, NS())
+            torch.testing.assert_close(actual, expected_q, rtol=0, atol=0)
+            torch.testing.assert_close(model.attn.call_args.args[1], expected_k, rtol=0, atol=0)
+            self.assertIs(rotary.cos_sin_cache, source)
+            cached = rotary._hy3_int8_cos_sin_cache
+            self.assertIs(cached[0], source)
+            self.assertEqual(cached[1].dtype, dtype)
+            if previous is not None:
+                if previous[0] is source and previous[1].dtype == dtype:
+                    self.assertIs(cached, previous)
+                else:
+                    self.assertIsNot(cached, previous)
+            previous = cached
+
     def test_qwen2_fusion_leaves_cache_write_to_attention(self):
         calls=[]
         x=torch.zeros(2,8);kv=torch.zeros(4,1,2)
@@ -62,6 +143,7 @@ class AttentionModelParityTests(unittest.TestCase):
         self.assertEqual(calls,['native',{'save_kv_cache':True}])
 
     def test_mla_fp8_padding_and_dense_scheduler_object(self):
+        from hcu_sglang.layers.attention import hcu_mla_backend as MLA, hcu_mla_utils as MU
         with patch.object(MU,'is_hcu',return_value=True):
             self.assertEqual(MU.get_hcu_mla_fp8_kv_cache_dim(512,0,torch.float8_e4m3fn,True),576)
             for d,r,t,h in [(512,64,torch.float8_e4m3fn,True),(512,0,torch.bfloat16,True),(512,0,torch.float8_e4m3fn,False)]:

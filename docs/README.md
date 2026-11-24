@@ -111,3 +111,5 @@ flowchart TB
 当前逐路径差异处置见 [迁移执行台账](../plans/sglang-das-execution.json)，维护规则见 [三方迁移](migration.md#全量差异执行台账)；当前 Hook 合同见 [目标清单](hcu-sglang-development.md#历史-json-快照)（`hcu-sglang-targets.json`）。
 
 GLM5.2 INT4 的单实例配方、适配过程与历史结果边界见 [GLM5.2 INT4 适配与0518对照](glm52-int4-adaptation.md)。
+
+GLM5.2 Channel FP8 的固定版本、TP8/EP8/CP8 配方及验证范围见 [FP8 适配记录](glm52-fp8-adaptation.md)。

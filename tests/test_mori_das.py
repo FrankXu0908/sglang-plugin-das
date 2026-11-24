@@ -10,6 +10,9 @@ from unittest.mock import Mock, patch
 import torch
 
 from hcu_sglang.environ import register_envs
+
+register_envs()  # topk_source reads envs.SGLANG_SIMULATED_EXPERT_BALANCE at import
+
 from hcu_sglang.layers.moe import mori_das, topk_source
 from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPLLCombineInput
 from sglang.srt.layers.moe.utils import MoeA2ABackend

@@ -9,9 +9,13 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def load_detection(hip, properties):
+def load_detection(hip, properties, available=True):
+    # A query that answers implies a visible HIP device. is_hcu() consults
+    # is_available() only after the query failed, to decide between a warning
+    # and an error, so the failing probes state their case with available.
     torch = SimpleNamespace(version=SimpleNamespace(hip=hip),
-                            cuda=SimpleNamespace(get_device_properties=properties))
+                            cuda=SimpleNamespace(get_device_properties=properties,
+                                                 is_available=Mock(return_value=available)))
     spec = importlib.util.spec_from_file_location(
         'isolated_hcu_detection', ROOT / 'hcu_sglang/utils/detection.py')
     module = importlib.util.module_from_spec(spec)
@@ -34,7 +38,6 @@ class SourceHardwareDecisionTests(unittest.TestCase):
             ('6.4', 'gfx938:sramecc+:xnack-', True, True),
             ('6.4', 'gfx928', True, False),
             ('6.4', 'gfx942', False, False),
-            ('6.4', '', False, False),
         ]:
             with self.subTest(hip=hip, arch=arch):
                 query = Mock(return_value=SimpleNamespace(gcnArchName=arch))
@@ -44,11 +47,36 @@ class SourceHardwareDecisionTests(unittest.TestCase):
                 if hip is None:
                     query.assert_not_called()
 
+    def test_empty_architecture_is_an_error_on_a_visible_hip_device(self):
+        # #113: an empty gcnArchName is a failed probe. With no device visible
+        # it is the usual non-HCU answer; with one visible it must not pass
+        # for an answer at all.
+        for available in (True, False):
+            with self.subTest(available=available):
+                query = Mock(return_value=SimpleNamespace(gcnArchName=''))
+                module = load_detection('6.4', query, available=available)
+                if available:
+                    with self.assertRaisesRegex(RuntimeError, 'visible HIP device 0'):
+                        module.is_hcu()
+                else:
+                    with self.assertLogs('isolated_hcu_detection', level='WARNING'):
+                        self.assertFalse(module.is_hcu())
+
     def test_initial_detection_failure_remains_a_non_hcu_result(self):
-        module = load_detection('6.4', Mock(side_effect=RuntimeError('no device')))
+        module = load_detection('6.4', Mock(side_effect=RuntimeError('no device')),
+                                available=False)
         with self.assertLogs('isolated_hcu_detection', level='WARNING'):
             self.assertFalse(module.is_hcu())
         self.assertFalse(module.is_hcu_native_fp8_supported())
+
+    def test_detection_failure_on_a_visible_hip_device_is_surfaced(self):
+        # #113: a device is visible but does not answer. That is not "not HCU"
+        # and must reach the caller instead of selecting the non-HCU paths.
+        module = load_detection('6.4', Mock(side_effect=RuntimeError('no device')))
+        with self.assertRaisesRegex(RuntimeError, 'Cannot determine the architecture of visible HIP device 0') as raised:
+            module.is_hcu()
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+        self.assertEqual(str(raised.exception.__cause__), 'no device')
 
     def test_native_fp8_query_failure_is_not_silently_reclassified(self):
         query = Mock(side_effect=[SimpleNamespace(gcnArchName='gfx938'),

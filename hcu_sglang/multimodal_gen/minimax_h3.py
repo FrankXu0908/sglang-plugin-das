@@ -63,12 +63,53 @@ def around_apply_rope_qk(original, q, k, cos_sin_cache, positions):
     return q, k
 
 
+def around_denoising_full_loop(original, stage, batch, server_args):
+    if not is_hcu():
+        return original(stage, batch, server_args)
+
+    from sglang.multimodal_gen.runtime.layers.usp import _A2A_STAGING_BUFFERS
+    from sglang.multimodal_gen.runtime.platforms import current_platform
+
+    try:
+        return original(stage, batch, server_args)
+    finally:
+        if _A2A_STAGING_BUFFERS:
+            import torch
+
+            device = current_platform.get_local_torch_device()
+            if device.type == "cuda":
+                index = device.index if device.index is not None else torch.cuda.current_device()
+                for key in tuple(_A2A_STAGING_BUFFERS):
+                    if key[2] == index:
+                        _A2A_STAGING_BUFFERS.pop(key, None)
+
+
 def register_hooks(registry=None) -> None:
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
     if registry is not None:
         HookRegistry = registry
 
+    from hcu_sglang.multimodal_gen import minimax_h3_vae
+
+    HookRegistry.register(
+        "sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages."
+        "minimax_h3.stages.denoising.MiniMaxH3DenoisingStage._run_full_loop",
+        around_denoising_full_loop,
+        HookType.AROUND,
+    )
+    HookRegistry.register(
+        "sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.processor."
+        "VAEProcessor.convert_numpy_to_tensor",
+        minimax_h3_vae.around_convert_numpy_to_tensor,
+        HookType.AROUND,
+    )
+    HookRegistry.register(
+        "sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.klvae."
+        "AutoencoderKL.setup_forward",
+        minimax_h3_vae.around_setup_forward,
+        HookType.AROUND,
+    )
     HookRegistry.register(
         "sglang.multimodal_gen.runtime.models.dits.minimax_h3._apply_rope_qk",
         around_apply_rope_qk,

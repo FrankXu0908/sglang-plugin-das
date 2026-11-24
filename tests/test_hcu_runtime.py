@@ -58,7 +58,9 @@ class HcuRuntimeTests(unittest.TestCase):
                 "    assert queue.get(timeout=5) == '_unsupported_fused_gemm'\n"
                 "    print('spawn bootstrap passed')\n")
             env = {**os.environ, 'PYTHONPATH': str(root) + os.pathsep + str(ROOT)}
-            result = subprocess.run([sys.executable, '-m', 'hcu_sglang'], cwd=root,
+            # -S as in the sibling checks: the HCU image's site hooks cost tens of
+            # seconds per interpreter, and the spawned worker starts with the same flag.
+            result = subprocess.run([sys.executable, '-S', '-m', 'hcu_sglang'], cwd=root,
                                     env=env, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('spawn bootstrap passed', result.stdout)

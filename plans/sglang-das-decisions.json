@@ -773,16 +773,18 @@
   },
   "python/sglang/kernels/jit/csrc/deepseek_v4/hash_topk.cuh": {
     "status": "implemented",
-    "rationale": "Own full Source hash-routing and mask kernels. Add only two validated-host zero-token returns to avoid invalid zero-grid HIP launches; preserve nonempty math, source logical warp32 bounds, PDL, mask stride and token-count contracts. Exact reverse patch restores pinned Source bytes.",
+    "rationale": "Own full Source hash-routing and mask kernels. Add only two validated-host zero-token returns to avoid invalid zero-grid HIP launches; preserve nonempty math, source logical warp32 bounds, PDL, mask stride and token-count contracts. Exact reverse patch restores pinned Source bytes. The overlay is opt-in (SGLANG_HCU_JIT_OVERLAY, 2026-11-05), so on the default path the same two zero-token returns run before the launch in hcu_sglang/layers/moe/dsv4_ops.py.",
     "implementation": [
       "hcu_sglang/jit_overlay/csrc/deepseek_v4/hash_topk.cuh",
-      "hcu_sglang/jit_overlay_loader.py"
+      "hcu_sglang/jit_overlay_loader.py",
+      "hcu_sglang/layers/moe/dsv4_ops.py"
     ],
     "source_alignment": "git:de390225d615381d3fd02b8d3eed639e5ef529b5:docs/hcu-dsv4-moe-ops-source-alignment.json",
     "tests": [
-      "tests/runtime/dsv4_hash_topk_gpu.py"
+      "tests/runtime/dsv4_hash_topk_gpu.py",
+      "tests/runtime/dsv4_ops_cpu.py"
     ],
-    "validation_scope": "7 isolated dev55 real gfx938 GPU/Graph tests pass; two actual cold-compile manifests match current owned header and wheel bytes. This is not whole-model or NVIDIA validation."
+    "validation_scope": "7 isolated dev55 real gfx938 GPU/Graph tests pass; two actual cold-compile manifests match current owned header and wheel bytes. This is not whole-model or NVIDIA validation. Default path with the overlay off, bw47 gfx936 2026-11-24: tests/runtime/dsv4_hash_topk_gpu.py (7 tests) and tests/runtime/dsv4_ops_cpu.py (6 tests) pass against the adapter-staged official file."
   },
   "python/sglang/kernels/jit/csrc/deepseek_v4/linear_bf16_fp32.cuh": {
     "status": "implemented",
@@ -1291,7 +1293,7 @@
       "git:de390225d615381d3fd02b8d3eed639e5ef529b5:docs/hcu-prefill-admission-gates-validation-20261101.json",
       "git:de390225d615381d3fd02b8d3eed639e5ef529b5:docs/hcu-tp8-deepseekv4-prefill-bcg-dev68-validation-20261101.json"
     ],
-    "ordinary_model_scope": "Frozen dd88288/dev68/619 files:8GPU BCG initialization and6 strict requests with cleanup passed, encoder flagFalse. Not encoder cache-hit/AUX transfer/BCG request-hit or dataset score."
+    "ordinary_model_scope": "Frozen dd88288/dev68/619 files:8GPU BCG initialization and6 strict requests with cleanup passed, encoder flagFalse. Not encoder cache-hit/AUX transfer/BCG request-hit or dataset score.",
     "implementation": [
       "hcu_sglang/mem_cache/cp_cache_layer_split/broadcast.py"
     ],
@@ -1955,7 +1957,7 @@
     "tests": [
       "tests/runtime/kv_events_cpu.py"
     ],
-    "validation_scope": "Public request entry with explicit admission/elastic namespace data fixtures, real registered native namespace seam without elastic backend, exception/nested context and non-HCU fallback. Ordinary8GPU service separately; full Source scheduler/LoRA model/elastic deployment pending."
+    "validation_scope": "Public request entry with explicit admission/elastic namespace data fixtures, real registered native namespace seam without elastic backend, exception/nested context and non-HCU fallback. Ordinary8GPU service separately; full Source scheduler/LoRA model/elastic deployment pending.",
     "validation_scope": "Source restoration, Muse text/omni/processor imports and 600/600 strict Hooks pass. Optional Helion and all GPU/numerical/distributed/model-service lanes remain unverified."
   },
   "python/sglang/srt/multimodal/processors/qwen_vl.py": {

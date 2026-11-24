@@ -57,6 +57,7 @@ class LoadAwarePipelineGpuTests(unittest.TestCase):
 
     def test_native_hash_solver_dispatch_pipeline_reads_real_valid_rows(self):
         from sglang.srt.layers.moe import hash_topk as N
+        from sglang.srt.utils import is_hip
         stack,solver,info,physical=self.fixture()
         with stack,torch.device('cuda'):
             obj=N.HashTopK(2,4,0,3,layer_id=0)
@@ -66,7 +67,10 @@ class LoadAwarePipelineGpuTests(unittest.TestCase):
             result=obj(torch.ones(3,8,device='cuda'),logits,inputs,num_token_non_padded=count,expert_location_dispatch_info=info);torch.cuda.synchronize()
             torch.testing.assert_close(physical[result.topk_ids[:2].long()],obj.tid2eid[:2].long(),rtol=0,atol=0)
             torch.testing.assert_close(solver._local_counts,torch.ones(4,device='cuda'),rtol=0,atol=0)
-            torch.testing.assert_close(result.topk_weights[2:],torch.zeros_like(result.topk_weights[2:]),rtol=0,atol=0)
+            # padded rows take the source's own branch: zero weights on HIP, masked ids otherwise
+            # (an HCU host answers CUDA by default; adapter governance §0.5)
+            if is_hip():torch.testing.assert_close(result.topk_weights[2:],torch.zeros_like(result.topk_weights[2:]),rtol=0,atol=0)
+            else:torch.testing.assert_close(result.topk_ids[2:],torch.full_like(result.topk_ids[2:],-1),rtol=0,atol=0)
 
 
 if __name__=='__main__':unittest.main()

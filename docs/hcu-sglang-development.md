@@ -31,6 +31,7 @@
 - [2026-11-20：Qwen-Image 2.1 四卡 Ulysses 直收](#2026-11-20-qwen-image-21-四卡-ulysses-直收)
 - [2026-11-20：MoriDAS Masked INT8 GEMM 写入契约](#2026-11-20-moridas-masked-int8-gemm-写入契约)
 - [2026-11-23：Qwen-Image 2.1 Ulysses 直收 PR 同步](#2026-11-23-qwen-image-21-ulysses-直收-pr-同步)
+- [2026-11-24：Qwen-Image 2.1 Ulysses 直收 release 更新](#2026-11-24-qwen-image-21-ulysses-直收-release-更新)
 - [附录：布局、操作方式与汇总](#附录布局操作方式与汇总)
 
 两份早期独立开发记录已全文收录。历史结果不代表当前代码已重新验证。
@@ -4391,6 +4392,46 @@ Graph 和 compile 下的端到端行为未单独测量。
 离线结构检查通过。全量 unittest 的 1 项失败和 2 项错误在未修改的
 `8b730e0` 基线上同样复现。
 
+## HY3 release 分支补齐（2026-11-23）
+
+基线为 `release/sglang_v0.5.22` 的 `1d51ae5`。本次按 main PR #46
+（`484e674`）与 #88（`708328a`）逐项补齐：HY3 在官方类上接入方法、
+NEXTN 使用独立层边界并恢复临时配置、缓存命中后按实际计算 token 数裁剪输出；
+INT8 分发保留原生量化接口，gfx936/gfx938 使用公开 pair32 权重排列及普通、
+低延迟两次 GEMM；合法零行矩阵直接返回空结果；非融合 INT8 RoPE 使用独立
+转换缓存，保留其他消费者共享的原始表。
+
+release 已有 Channel FP8 连续 scale、每 token scale 和 GLM FP8 优化，
+均保留。DeepEP 清理缓冲区继续按当前包签名判断 `num_topk`，没有退回 main
+较旧的固定传参。保留 release 的环境变量、KV 布局和推理参数默认值。
+配套 Adapter release 补齐原生分发引用、空闲输入、HIP Graph 查询及厂商 FA
+启动检查。DeepGEMM 包仍须提供公开 pair32 pack/contiguous/masked 接口。
+
+本次验证：L0（714 Python、8 Skill）、导览生成快照和差异空白检查通过。
+S7 容器 Python 3.12 / PyTorch 2.11.0、官方 SGLang
+`baa9befa381511cd4d56f83980951e5a45fffc6d`，配套本次 Adapter 候选，
+设置 `HCU_ADAPTER_HOST=none`，没有隐藏 GPU。以下专项共 43 项通过、无跳过：
+
+- `tests/test_hunyuan_method_hooks.py`、
+  `tests/runtime/forward_batch_cached_prefill_cpu.py`、
+  `tests/runtime/deepep_current.py`、`tests/runtime/compressed_int8.py`、
+  `tests/runtime/quant_ops_dispatch.py`：40 项通过，另有 14 个 subtest。
+- `tests/runtime/fix_attention_models.py -k hy3`：2 项通过，另有 4 个 subtest。
+- `HCU_PLUGIN_RUN_LAYER_FIX_TESTS=1` 下执行
+  `tests/test_fix_layers_moe.py -k int8_deepgemm_postload`：1 项通过。
+
+原 release 对照复现了两处缺陷：热缓存裁剪两例失败，空输入四个子例仍调用
+计算内核；冷缓存用例通过。候选的对应检查全部通过。
+
+上述测试验证构造、参数、输出裁剪、缓存隔离及计算调用合同；部分昂贵计算使用
+测试替身，没有执行完整 HY3 服务、数据集精度或性能对照。历史模型输出、精度
+和 trace 不作为这份 release 组合的验收结果。没有修改用户脚本或启停模型服务。
+
+导览页已做桌面渲染检查；交互和窄屏检查未完成。Adapter 配置页新增 Graph 项
+可以显示，但原 release 的 `mamba_state_scatter` 缺少 UI 默认值，原版与候选均
+在后续渲染时报错；该已有缺陷未在本次扩大修改范围。
+`fix_attention_models.py` 仅运行 HY3 两项，其他模型没有在本轮验收。
+
 ## GLM-5.3 CT W4A8 四节点 P/D 配方回移（SGLang 0.5.22）
 
 同步主线 #23 的 `SGLANG_HCU_W8A8_USE_LIGHTOP` 注册项。GLM-5.3 的 CT checkpoint 同时包含 channel INT4 专家和 W8A8 Linear。P、D 配方显式设为 `1` 时，Linear 的 `quant_ops.triton_scaled_mm` 将输入、scale、bias 和调优参数交给 `lightop.gemm_ops.triton_scaled_mm`。默认值为 false，保留原有小 M 调优。专家继续由 `HCUW4A8Int8DeepEPMoEMethod` 处理，normal 与 low-latency 的 dispatcher 输出均为 INT8。
@@ -4443,6 +4484,21 @@ GEMM 由 DeepGEMM 执行。算子声明 `output` 可写，真实实现和 fake �
 调用方提供的原始 GEMM2 输出地址。普通 CUDA Graph 更换输入重放两次也通过。真实双节点
 RDMA 与注册通信缓冲区仍待服务验证。
 
+### HY3 release 同步冲突处理（2026-11-23）
+
+HY3 分支同步公司 release `fae0bc6`。`around_ep_init` 保留 MoriDAS 对自身
+分发配置的所有权和 `set_quant_config` 能力检查；DeepEP W8A8 使用
+`hcu_w8a8_int8_dispatch`，同时设置普通、低延迟和通用输出类型为 INT8，
+不将 W8A8 标记为 W4A8 或 legacy GroupGEMM。已有其他配置保留。
+定向回归通过实际 DeepEP AUTO dispatcher 的两种实现检查输出类型与配置，
+另检查 MoriDAS 配置不被 DeepEP 初始化覆盖。本次未启停模型服务，
+完整模型精度和性能不属于此次合并检查。
+
+S7 `lzj_1103` 中与 adapter release `d715496` 加 HY3 适配组合验证：
+Plugin 定向 66 项、HY3 RoPE 2 项、INT8 postload 1 项通过，无跳过；
+另有 31 个 subtest。Adapter 定向 44 项和 6 个 subtest 通过。
+两仓 L0、导览快照与配置档位表检查通过；本次没有重做导览交互和窄屏验收。
+
 ## GLM-5.3 W4A8 HiSparse PD Decode 容量
 
 对齐框架 [#70](https://github.com/maxiaobetter/sglang-das/pull/70) 的 Channel W4A8、FP8 KV、DCP=1 配置。目标 Index-K 与逻辑分配器按完整页取整，MTP draft 从分配器读取相同的地址空间。PD Decode worker 用逻辑池容量计算请求上限，设备热池仍按物理容量分配。发布基线的 Mooncake MLA host 注册已使用 CPU 张量地址。
@@ -4466,3 +4522,74 @@ RDMA 与注册通信缓冲区仍待服务验证。
 
 本次只执行离线结构与 CPU 检查，不重新声明历史 GPU、图片精度或性能结果。
 导览模板及交互未修改，生成快照检查不代替浏览器渲染、交互和窄屏验收。
+
+## 2026-11-21 GLM5.2 FP8 最新 22 分支组合验证
+
+以 1d51ae5 为固定 plugin 基点，保留用户 3872dc0/#89 的既有 RoPE 方案，启动配方补齐 LightOP RoPE 开关；不新增 RoPE 实现。仅新增 current_dsa 的 LightOP planner resolver，backend/indexer 共用，非 HCU 委托原 resolver。adapter 同卡数外来 PCI guard 修复单独归仓。修复前反例、旧基点组件通过及最新组合未验收项分别记录，见 [FP8 适配记录](glm52-fp8-adaptation.md)。
+
+本轮固定组合已完成 Graph 服务、两轮各81请求文本/EAGLE统计一致、三项正常stop检查、32份逐rank trace及稳定吞吐对照。具体短输入TTFT退化、0518 profiler后会话异常和未完成数据集精度范围见 FP8 适配记录；未声明全仓合同或CPU全套通过。
+
+## 2026-11-23 PR 拆分检查
+
+LightOP MQA planner 修复独立分支重新通过4项接线测试（CPU张量、设备可见）和3项gfx938 GPU/变输入Graph回归。隐藏设备时接线测试收集遇到上游 cutlass_fp8_supported 的 NoneType 比较错误，原失败保留，不记作通过。完整CPU unittest复测195项，仍为3项导入错误、13项跳过。L0与导览快照检查通过；未执行浏览器视觉验收。adapter节点门禁与triage失败另列于两仓PR说明，未以模型精度结果覆盖这些失败。仅准备Draft评审，未重复提交已有RoPE/TopK实现。
+
+## MiniMax-H3 参考视频预处理
+
+将 DAS 提交 `62713c5` 的输入处理移至 diffusion 插件。HCU 先传输 uint8 帧，
+直接生成连续的 FP32 视频。VAE 仅对运行时持有的输入复用默认归一化的存储，
+重新配置自定义 transform 后回到调用方提供的实现。
+
+初次移植在 1507 镜像原插件基线、gfx938 上验证。124×768×1344 RGB 帧
+经过真实 processor 的峰值分配从 4394.25 降至 1830.94 MiB。两组各运行
+五次，归一化输出及真实 Ref2VA 权重对 17 帧小片段编码所得 FP16 latent
+均逐字节相同。该数据覆盖参考输入和编码阶段。
+
+## MiniMax-H3 去噪结束时释放 USP 显存
+
+0.5.22 已按角色、dtype 和设备复用 Ulysses all-to-all 的容量。DAS 提交
+`62713c5` 还在去噪退出时交还当前设备的缓存。插件将这一部分接到 H3
+完整去噪循环的退出路径，使后续 VAE 和请求可用这部分内存。
+在 gfx938 注入请求异常后，原始异常和已返回视图均保留。一个 256 MiB
+的实际 staging 分配在原镜像继续驻留，插件在最后一个视图释放时回收全部
+256 MiB。该检查覆盖缓存生命周期，未复现旧版 50 请求压力场景。
+
+## MiniMax-H3 HCU SubBlock 稀疏注意力
+
+从 DAS 的 `52f1e99` 迁移到 diffusion 插件。使用 `SGLANG_PLUGINS=hcu` 入口，
+设置 `--attention-backend subblock_sparse_attn` 和
+`--component-attention-backends text_encoder=torch_sdpa,transformer=subblock_sparse_attn`。
+需安装与目标 Torch、DTK 和 Python 匹配的 `dcu_bsa` wheel。本轮构建使用
+DTK 26.10、Torch 2.13、Python 3.12，并包含 gfx936 和 gfx938。
+稀疏内核使用 BF16、head_dim 128，前 10 步按原生 schedule 执行稠密注意力。
+
+插件在 HCU 上连接原生 SubBlock router 与 DCU 内核。逐行有效块数与局部尾块
+传给内核，仅排序有效前缀。内部稠密实现单独记录后端选择，外层 transformer
+仍校验显式配置是否生效。在 release 使用的 FA2 只继承基础 packed-varlen 方法时，
+HCU 通过原有 flash-attn 的变长入口执行 sBSA 的内部稠密回退。
+
+1507 镜像的初次移植在两个架构各通过 26 项原生数值测试，均通过 SGLang 后端解析和第 9/10 步
+派发检查。gfx938 的 37,736 token、14 heads 测试中，FA2 中位耗时
+45.43 ms，sBSA 含路由、排序和执行为 22.48 ms。固定稀疏计划的四个边界
+Q 行通过 FP32 参考比对。
+
+
+## 2026-11-24：Qwen-Image 2.1 Ulysses 直收 release 更新
+
+将 PR #115 的 `c6cf298` 合并到本次获取的 release 基线 `ba442a0`，
+包含 `c73e515` 的 LightOP MQA planner / GLM5.2 FP8 文档与示例，以及后续
+HY3、单测和 MiniMax-H3 更新。冲突位于开发记录、生成导览和注册目标合同；
+保留双方记录与目标，并重新生成导览。未删除 release 中的文档、示例或运行时脚本。
+
+相对新基线，运行时代码仍只有 `attention.py` 和
+`qwen_image21_direct_recv.py`。直收模块字节与 PR 原 head 相同，两个 Qwen
+包装函数的 AST 保持不变；新基线的 attention Hook 全部保留，仅增加原有
+Qwen 目标标记和 replicated-KV-prefix 两个 Hook。文档、生成页及这两个 Hook
+的目标合同作为配套变更保留。
+
+宿主 Python 3.12 的 L0（731 Python、8 Skill）与导览快照检查通过。
+候选和未修改的 `ba442a0` 各执行 212 项 unittest，均为 13 errors、21 skipped；
+13 项错误的测试名与终端异常逐项一致，全部是宿主缺少 Torch。未将全量单测
+记为通过。新基线相对差异的空白检查通过，没有新增删除项。
+
+本次为分支同步，未重跑四卡模型、PNG 逐位或延迟测试；此前 5.65% 和 PNG
+SHA-256 结果保持历史证据口径。未修改导览模板或交互，未执行浏览器视觉验收。

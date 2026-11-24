@@ -64,6 +64,7 @@ from sglang.srt.model_executor.forward_context import get_attn_backend, get_toke
 from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
 from sglang.srt.model_executor.runner import get_is_capture_mode
 from sglang.srt.model_loader.weight_utils import default_weight_loader
+from sglang.srt.models import hunyuan_v3 as native_hunyuan_v3
 from sglang.srt.runtime_context import get_exec, get_model, get_parallel, get_stream
 from sglang.srt.utils import get_bool_env_var, is_cuda, is_hip, make_layers
 from sglang.srt.utils.common import LazyValue
@@ -166,7 +167,7 @@ class HYV3FeedForward(nn.Module):
         tp_rank: Optional[int] = None,
         tp_size: Optional[int] = None,
     ) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
@@ -212,7 +213,7 @@ class HYV3MoEFused(nn.Module):
         prefix: str = "",
         alt_stream: Optional[torch.cuda.Stream] = None,
     ):
-        super().__init__()
+        nn.Module.__init__(self)
         self.layer_id = layer_id
         self.alt_stream = alt_stream
         self.n_routed_experts = config.num_experts
@@ -222,7 +223,7 @@ class HYV3MoEFused(nn.Module):
         self.expert_bias = nn.Parameter(
             torch.empty(config.num_experts, dtype=torch.float32)
         )
-        self.expert_bias.weight_loader = HYV3MoEFused.ebias_weight_loader
+        self.expert_bias.weight_loader = native_hunyuan_v3.HYV3MoEFused.ebias_weight_loader
         scoring_func = "sigmoid"
         self.e_score_correction_bias = self.expert_bias
         self.router_scaling_factor = getattr(config, "router_scaling_factor", 1.0)
@@ -274,7 +275,7 @@ class HYV3MoEFused(nn.Module):
         )
 
         if getattr(config, "num_shared_experts", 0) > 0:
-            self.shared_mlp = HYV3FeedForward(
+            self.shared_mlp = native_hunyuan_v3.HYV3FeedForward(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size
                 * config.num_shared_experts,
@@ -463,7 +464,8 @@ class HYV3MoEFused(nn.Module):
                     final_hidden_states, None
                 )
 
-        final_hidden_states = post_experts_all_reduce(final_hidden_states)
+        if get_parallel().hy3_sp:
+            final_hidden_states = post_experts_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
 
@@ -510,7 +512,8 @@ class HYV3MoEFused(nn.Module):
             final_hidden_states, shared_output
         )
 
-        final_hidden_states = post_experts_all_reduce(final_hidden_states)
+        if get_parallel().hy3_sp:
+            final_hidden_states = post_experts_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
 
@@ -529,7 +532,7 @@ class HYV3Attention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
         self.hidden_size = hidden_size
         attn_tp_rank = get_parallel().attn_tp_rank
         attn_tp_size = get_parallel().attn_tp_size
@@ -725,13 +728,33 @@ class HYV3Attention(nn.Module):
                 v_scale=None,
                 epsilon=self.q_norm.variance_epsilon,
             )
+            q = q.reshape(qkv.shape[0], self.q_size)
             used_fused_hunyuan_rotary_kv_store = True
         else:
             if self.use_qk_norm:
                 q, k = _apply_hy3_qk_norm(
                     q, k, self.q_norm, self.k_norm, self.head_dim
                 )
-            q, k = self.rotary_emb(positions, q, k)
+            if _is_hcu and self.qkv_proj.weight.dtype == torch.int8:
+                from sgl_kernel import rotary_embedding
+
+                source_cache = self.rotary_emb.cos_sin_cache
+                cached = getattr(self.rotary_emb, "_hy3_int8_cos_sin_cache", None)
+                if (
+                    cached is None
+                    or cached[0] is not source_cache
+                    or cached[1].device != q.device
+                    or cached[1].dtype != q.dtype
+                ):
+                    cached = (source_cache, source_cache.to(q.device, dtype=q.dtype))
+                    self.rotary_emb._hy3_int8_cos_sin_cache = cached
+                rotary_embedding(
+                    positions, q, k, self.head_dim,
+                    cached[1],
+                    self.rotary_emb.is_neox_style,
+                )
+            else:
+                q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(
             q,
             k,
@@ -807,12 +830,12 @@ class HYV3DecoderLayer(nn.Module):
         prefix: str = "",
         alt_stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
         self.layer_id = layer_id
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         rope_theta, _ = get_rope_config(config)
-        self.self_attn = HYV3Attention(
+        self.self_attn = native_hunyuan_v3.HYV3Attention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -832,7 +855,7 @@ class HYV3DecoderLayer(nn.Module):
                 mlp_tp_rank, mlp_tp_size = 0, 1
             else:
                 mlp_tp_rank, mlp_tp_size = None, None
-            self.mlp = HYV3FeedForward(
+            self.mlp = native_hunyuan_v3.HYV3FeedForward(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -840,13 +863,14 @@ class HYV3DecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
                 tp_rank=mlp_tp_rank,
                 tp_size=mlp_tp_size,
+                reduce_results=get_parallel().hy3_sp,
             )
             self.block_type = "feedforward"
             is_layer_sparse = False
             is_previous_layer_sparse = False
             is_next_layer_sparse = layer_id + 1 >= first_k_dense_replace
         else:
-            self.mlp = HYV3MoEFused(
+            self.mlp = native_hunyuan_v3.HYV3MoEFused(
                 config=config,
                 layer_id=layer_id,
                 quant_config=quant_config,
@@ -863,11 +887,12 @@ class HYV3DecoderLayer(nn.Module):
                 and layer_id + 1 >= first_k_dense_replace
             )
 
-        self.attn_boundary, self.ffn_boundary = append_stages(
-            (declare_attn(), self.input_layernorm),
-            (declare_ffn(sparse=is_layer_sparse, next_layer_sparse=is_next_layer_sparse),
-             self.post_attention_layernorm),
-        )
+        if not get_parallel().hy3_sp:
+            self.attn_boundary, self.ffn_boundary = append_stages(
+                (declare_attn(), self.input_layernorm),
+                (declare_ffn(sparse=is_layer_sparse, next_layer_sparse=is_next_layer_sparse),
+                 self.post_attention_layernorm),
+            )
 
     def forward(
         self,
@@ -902,15 +927,9 @@ class HYV3DecoderLayer(nn.Module):
                 hidden_states = self.mlp(
                     hidden_states,
                     forward_batch,
-                    ffn_exit.fuse_mlp_allreduce,
-                    ffn_exit.mlp_reduce_scatter,
                 )
             else:
-                hidden_states = self.mlp(
-                    hidden_states,
-                    should_allreduce_fusion=ffn_exit.fuse_mlp_allreduce,
-                    use_reduce_scatter=ffn_exit.mlp_reduce_scatter,
-                )
+                hidden_states = self.mlp(hidden_states)
         hidden_states = ffn_exit.finish(hidden_states)
         hidden_states, residual = stream.export(hidden_states)
         forward_batch.residual_stream = None
@@ -950,7 +969,7 @@ class HYV3Model(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
-        super().__init__()
+        nn.Module.__init__(self)
         self.config = config
         self.quant_config = quant_config
         self.pp_group = get_parallel().pp_group
@@ -970,7 +989,7 @@ class HYV3Model(nn.Module):
         self.layers, self.start_layer, self.end_layer = make_layers(
             config.num_hidden_layers,
             lambda idx, prefix: (
-                HYV3DecoderLayer(
+                native_hunyuan_v3.HYV3DecoderLayer(
                     config=config,
                     layer_id=idx,
                     quant_config=quant_config,
@@ -1069,12 +1088,12 @@ class HYV3ForCausalLM(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
-        super().__init__()
+        nn.Module.__init__(self)
         self.config = config
         self.quant_config = quant_config
         self.pp_group = get_parallel().pp_group
 
-        self.model = HYV3Model(config, quant_config, prefix=f"{prefix}.model")
+        self.model = native_hunyuan_v3.HYV3Model(config, quant_config, prefix=f"{prefix}.model")
         if self.pp_group.is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
@@ -1102,7 +1121,7 @@ class HYV3ForCausalLM(nn.Module):
             lambda: {
                 layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
                 for layer_id in range(self.model.start_layer, self.model.end_layer)
-                if isinstance(self.model.layers[layer_id].mlp, HYV3MoEFused)
+                if isinstance(self.model.layers[layer_id].mlp, native_hunyuan_v3.HYV3MoEFused)
             }
         )
 

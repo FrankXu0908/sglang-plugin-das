@@ -635,8 +635,6 @@ def around_ep_init(original, layer, *args, **kwargs):
         from hcu_sglang.layers.moe.deepep_int8 import configure_layer
         bound = inspect.signature(original).bind(layer, *args, **kwargs)
         configure_layer(layer, bound.arguments.get("quant_config"))
-        # MoriDAS reuses the INT8 layer flags but owns its dispatch ABI, so
-        # DeepEP-specific wire-format settings must not be applied to it.
         if isinstance(
             getattr(layer, "dispatcher", None), mori_das.MoriDasDispatcher
         ):
@@ -645,18 +643,13 @@ def around_ep_init(original, layer, *args, **kwargs):
             getattr(layer, "use_int8_w8a8_deepgemm", False)
             and hasattr(layer.dispatcher, "set_quant_config")
         ):
-            # The upstream dispatcher defaults to FP8 on GPU.  The HCU
-            # W8A8 DeepGEMM kernels consume signed INT8 activations, so keep
-            # both halves of DeepEP auto mode on the INT8 wire format.
-            layer.dispatcher.set_quant_config(
-                {
-                    **(getattr(layer.dispatcher, "quant_config", None) or {}),
-                    "normal_dispatcher_output_dtype": "int8",
-                    "low_latency_dispatcher_output_dtype": "int8",
-                    "hcu_w4a8_int8_dispatch": True,
-                    "hcu_legacy_groupgemm": True,
-                }
-            )
+            layer.dispatcher.set_quant_config({
+                **(getattr(layer.dispatcher, "quant_config", None) or {}),
+                "hcu_w8a8_int8_dispatch": True,
+                "dispatcher_output_dtype": "int8",
+                "normal_dispatcher_output_dtype": "int8",
+                "low_latency_dispatcher_output_dtype": "int8",
+            })
     if _is_hcu and getattr(getattr(layer, "quant_method", None), "hcu_w4a8_hipc", False):
         from sglang.srt.layers.moe.utils import get_deepep_mode
         layer.deprecate_flag = False

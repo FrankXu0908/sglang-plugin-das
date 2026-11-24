@@ -67,6 +67,9 @@ def triton_scaled_mm(
     bias: Optional[torch.Tensor] = None,
     best_config: Optional[list] = None,
 ) -> torch.Tensor:
+    if a.dim() == 2 and b.dim() == 2 and a.shape[0] == 0 and a.shape[1] == b.shape[0]:
+        return torch.empty((0, b.shape[1]), device=a.device, dtype=out_dtype)
+
     native_gemm = getattr(envs, "SGLANG_HCU_W8A8_USE_LIGHTOP", None)
     # w8a8 decode with small M is not covered by the smooth GEMM tuning table;
     # explicit slide values avoid excessive padding in the default heuristic.

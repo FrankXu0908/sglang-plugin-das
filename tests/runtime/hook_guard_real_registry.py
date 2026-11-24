@@ -40,6 +40,12 @@ def load_real_registry(python_root: Path):
     module.__file__ = str(source)
     sys.modules["sglang.srt.plugins.hook_registry"] = module
     exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), module.__dict__)
+    # hook_guard.install() reaches the registry with ``from sglang.srt.plugins
+    # import hook_registry``, which reads the attribute off the parent package
+    # before sys.modules. Where the installed sglang is already imported (an
+    # image whose startup loads the plugins), that attribute still names the
+    # installed registry and the guard would land on one this check never drives.
+    sys.modules["sglang.srt.plugins"].hook_registry = module
     return module
 
 
@@ -66,10 +72,9 @@ def main() -> int:
     import json
 
     good = "json.dumps"
-    absent = (
-        "sglang.multimodal_gen.configs.pipeline_configs.wan."
-        "WanI2V480PConfig.__post_init__"
-    )
+    # Two targets no build provides. They fail on the same object, so the
+    # guard groups them into one summary line.
+    absent = "json.dumps.__hcu_absent__"
 
     calls = []
 
@@ -90,7 +95,6 @@ def main() -> int:
     HookRegistry.reset()
     HookRegistry.register(good, around_a, HookType.AROUND)
     HookRegistry.register(good, around_b, HookType.AROUND)
-    # Two targets the build does not provide, both unresolvable.
     HookRegistry.register(absent, around_a, HookType.AROUND)
     HookRegistry.register(absent + "_x", around_b, HookType.AROUND)
 

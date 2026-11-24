@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 import unittest
 from types import SimpleNamespace
@@ -12,6 +15,14 @@ class SmoothAsmDispatchTests(unittest.TestCase):
     def tearDown(self):C._w8a8_smooth_asm_supported.cache_clear()
     def args(self,m=17,n=128,k=256):
         return torch.ones(m,k,dtype=torch.int8),torch.ones(n,k,dtype=torch.int8).T,torch.ones(m,1),torch.ones(n,1)
+
+    def test_empty_token_batch_returns_empty_output_without_launching_kernels(self):
+        a,b,sa,sb=self.args(m=0,n=512,k=4096)
+        for dtype in (torch.bfloat16,torch.float16):
+            for bias,config in ((None,None),(torch.ones(512,dtype=dtype),[1,2,3])):
+                with self.subTest(dtype=dtype,bias=bias is not None),patch.object(C,'_is_hcu',True),patch.object(O,'gemm_w8a8_smooth_asm',side_effect=AssertionError('empty ASM launch')),patch.object(C.quant_ops,'triton_scaled_mm',side_effect=AssertionError('empty Triton launch')):
+                    out=C.triton_scaled_mm(a,b,sa,sb,dtype,bias,config)
+                    self.assertEqual(out.shape,(0,512));self.assertEqual(out.dtype,dtype);self.assertEqual(out.device,a.device)
 
     def test_architecture_probe_rejects_fatal_unsupported_or_unknown_and_caches(self):
         device=torch.device('cuda',0)

@@ -83,7 +83,6 @@ from sglang.srt.layers.attention.dsa_backend import (
     q8kv8_topk_length_from_indices,
     quantize_k_cache,
     resolve_num_sms,
-    resolve_paged_mqa_logits_metadata_fn,
     seqlens_expand_triton,
     should_use_dsa_fused_topk,
     torch,
@@ -93,6 +92,7 @@ from sglang.kernels.ops.attention.dsa.triton_kernel import get_valid_kv_indices
 from sglang.kernels.ops.quantization.fp8_kernel import fp8_dtype
 from hcu_sglang.layers.attention.current_dsa.dsa_topk_backend import DSATopKBackend, TopkTransformMethod
 from hcu_sglang.layers.attention.current_dsa.paged_mqa_logits_backend import use_native_paged_mqa_schedule
+from hcu_sglang.layers.attention.current_dsa.mqa_schedule import resolve_paged_mqa_logits_metadata_fn
 from hcu_sglang.utils.detection import is_hcu
 _is_hcu = is_hcu()
 if _is_hcu:
