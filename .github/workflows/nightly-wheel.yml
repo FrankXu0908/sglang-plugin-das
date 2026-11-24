@@ -3,21 +3,19 @@
 
 name: Nightly Wheel
 
-# main 线构建 hcu-sglang-plugin 纯 python wheel，
+# release 线构建 hcu-sglang-plugin 纯 python wheel，
 # 版本在构建期打成 +hcu.<时间>.g<commit6>，产物即最终包（不走 CIUpload REPAIR / 上传后改写）。
-# push main 直接上传 nightly 归档；workflow_dispatch 只构建并保留 artifact。
+# push release/** 直接上传 nightly 归档；main 是开发线，不再触发打包。
+# workflow_dispatch 只构建并保留 artifact。
+# 手动触发一律构建发起本次运行所在分支的 HEAD，不提供 ref 输入：编包不允许
+# 指定分支/tag/commit，产物来源只能是实际被检出的这一次提交。
 
 on:
   push:
     branches:
-      - main
+      - 'release/**'
+  # 无 ref 输入：手动触发只构建当前分支（发起运行所在分支），无法指定分支或提交
   workflow_dispatch:
-    inputs:
-      ref:
-        description: '要构建的 Git ref/branch/tag/SHA，默认当前分支 HEAD'
-        required: false
-        default: ''
-        type: string
 
 permissions:
   contents: read
@@ -51,9 +49,9 @@ jobs:
       DTK_VER: '2610'
 
     steps:
+      # 默认 checkout 触发这次运行的提交；没有 ref 输入，版本戳里的 g<commit6>
+      # 与实际产物同源
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.sha }}
 
       # 戳由 build.sh 自己算（<时间>.g<commit6>）并在同一次运行里烙进 wheel；
       # 构建后端（setuptools/wheel）缺失时 build.sh 会自己补装

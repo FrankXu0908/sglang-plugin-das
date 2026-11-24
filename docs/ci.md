@@ -28,9 +28,9 @@ GitHub Actions 已配置以下 workflow（配置文件存在不等于真实触�
 | 文件 | 触发 | 内容 | 依赖 |
 |---|---|---|---|
 | [.github/workflows/quality-gate.yml](../.github/workflows/quality-gate.yml) | PR | 复用 `HYGON-AI/quality-gate` 的 PR 门禁 | 组织复用 workflow |
-| [.github/workflows/nightly-wheel.yml](../.github/workflows/nightly-wheel.yml) | push `main` / 手动 dispatch | [packaging/build.sh](../packaging/build.sh) 构建 wheel；push 时经 CIUpload 上传 `das_nightly/dtk2610`，dispatch 只保留 artifact | 自托管 runner `hygon-build`、`vars.HARBOR_SITE`、`vars.PYPI_URL`、`secrets.PYPI_PASSWORD` |
+| [.github/workflows/nightly-wheel.yml](../.github/workflows/nightly-wheel.yml) | push `release/**` / 手动 dispatch（无 `ref` 输入） | [packaging/build.sh](../packaging/build.sh) 构建 wheel；push 时经 CIUpload 上传 `das_nightly/dtk2610`，dispatch 只保留 artifact | 自托管 runner `hygon-build`、`vars.HARBOR_SITE`、`vars.PYPI_URL`、`secrets.PYPI_PASSWORD` |
 
-nightly 在构建期把版本打成 `<pyproject 版本>+hcu.<YYMMDDHHMM>.g<commit6>`，产物即最终包，不做上传后改写。[.workflow/l0-gate.yml](../.workflow/l0-gate.yml) 仍只是 runner-neutral 命令配方，nightly 不执行 L0 与单测；workflow 生效前需完成一次真实 push 触发核对并记录结果。
+nightly 在构建期把版本打成 `<pyproject 版本>+hcu.<YYMMDDHHMM>.g<commit6>`，产物即最终包，不做上传后改写。push `release/**` 时构建并上传 `das_nightly/dtk2610`；`main` 是开发线，不再触发打包（push 事件执行被推分支上的 workflow 文件）。手动 dispatch 没有 `ref` 输入，只按默认 checkout 构建发起运行所在分支的 HEAD，不能指定分支、tag 或 commit，版本戳里的 `g<commit6>` 与实际产物同源。[.workflow/l0-gate.yml](../.workflow/l0-gate.yml) 仍只是 runner-neutral 命令配方，nightly 不执行 L0 与单测；workflow 生效前需完成一次真实 push 触发核对并记录结果。
 
 ## 3. 验证分层与运行时门禁规划
 
