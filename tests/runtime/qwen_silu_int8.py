@@ -7,6 +7,10 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from hcu_sglang.environ import register_envs
+
+register_envs()
+
 from hcu_sglang.layers.quantization import compressed_int8
 from hcu_sglang.layers.quantization.compressed_int8 import PrequantizedInt8Input
 from hcu_sglang.models.qwen import silu_int8

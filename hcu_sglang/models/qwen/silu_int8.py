@@ -10,13 +10,13 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes.compressed_tensor
 )
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 from sglang.srt.runtime_context import get_exec, get_forward
-from sglang.srt.utils import get_bool_env_var
+from sglang.srt.environ import envs
 
 from hcu_sglang.layers.quantization.compressed_int8 import PrequantizedInt8Input
 from hcu_sglang.utils.detection import is_hcu
 
 logger = logging.getLogger(__name__)
-enabled = get_bool_env_var("SGLANG_HCU_QWEN_SILU_INT8_FUSION") and is_hcu()
+enabled = envs.SGLANG_HCU_QWEN_SILU_INT8_FUSION.get() and is_hcu()
 
 
 def register():

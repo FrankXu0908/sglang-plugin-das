@@ -4656,3 +4656,26 @@ SHA-256 结果保持历史证据口径。未修改导览模板或交互，未执
 
 移除部署角色和量化判断后，复验了 Hook 的放行与回退分支。上述 GPU 和性能结果来自此前的 W4A8 Prefill 部署。
 
+
+## 2026-11-25 Qwen4 BF16 W4A8 启动默认值
+
+基于 release/sglang_v0.5.22@27ddb30，保留本地 QSA HIP guard；adapter
+使用原已验证 4c59b0e，不改其实现。新增 `serve_defaults.py`，在 HCU launcher
+与 plugin 注册入口的 vendor/model imports 前按本地 checkpoint 类型、BF16
+及 SlimQuant W4A8 选择默认配方。23 个模型配置默认值 + 2 个有条件的 P 角色
+配置使用 setdefault；另 4 个配置直接沿用上游默认。SiLU INT8 改用 typed env。
+配置、覆盖与不适用入口见 [配置管理](configuration.md#qwen4-w4a8-启动默认值)。
+
+2026-11-25 在 6 节点 DTK2610 / Python3.12 guide 容器、物理 GPU0–7 实测
+2P1D。完整环境变量与精简组均 HumanEval 8/8、基础视觉算术 4/4、MathVision
+3/4（id=4 原失败保留）。250k/1250、C4、85.0176% 实测前缀命中，p90 TTFT
+6.3401→6.3585s，p90 TPOT 12.1875→11.7593ms。短枚举 MTP 探针 8×1024
+输出，接受率 69.84%→75.77%，平均接受长度 3.0952→3.2732；小样本波动
+不能解释为默认化提升 MTP。decode graph、NUMA bind、原并行与模型参数保留。
+
+当前修改验证：7 项默认值隔离回归、10 项 QSA guard、L0 与导览快照检查；
+容器全量 unittest 219 项，4 个无 GPU 导入错误、16 skipped，4 个错误在
+untouched upstream 相同测试复现。本地缺 torch/numpy 的错误另存，未算通过。
+未执行浏览器渲染、两节点、其它模型 GPU 启动、全量精度、程序化无 argv
+Engine 或长测。SGLang 为镜像自带 0.5.22 wheel，未携带可核验 core Git SHA；
+服务证据绑定其完整文件摘要，不用 Router commit 冒充 Python core 版本。

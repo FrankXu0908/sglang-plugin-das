@@ -228,3 +228,37 @@ gather。各项显式开关和构建产物要求见前面的对应小节。
 `SGLANG_GLM_PREFILL_SHARED_OVERLAP=1` 独立启用 eager prefill 的共享专家旁流。
 Normal DeepEP 提交 routed FP8 量化后记录事件，旁流等待该事件后执行共享专家，
 主流在合并输出前等待旁流结束。两个开关默认关闭。
+
+## Qwen4 W4A8 启动默认值
+
+`hcu_sglang.launch_server` 在导入服务之前调用
+`serve_defaults.apply_qwen4_serve_defaults()`；plugin 注册入口在加载 vendor
+与模型模块之前补调。仅匹配本地 `config.json` 的
+`model_type=qwen4_exp/qwen4_exp_text`、BF16 和
+`slimquant_w4a8/slimquant_w4a8_marlin`，不依赖权重目录名。
+显式 CLI dtype/quantization 优先于 checkpoint。未匹配、非 HCU、远程模型 ID
+及没有 argv 的程序化 Engine 不应用本配方。
+
+默认项由 `hcu_sglang/serve_defaults.py` 集中维护：QSA 4096 key span /
+512 MiB logits / native-paged，compact prefill、local routing、routed INT8、
+SiLU INT8 融合、split HC mix、flat scatter、LightOp、fused top-k、causal
+conv、AITER linear attention / AR、W8A8 method 3、AITER W4A8 MoE C / native
+sort、DP gatherv、Python radix core 和 PD prefill DP rank 查询。
+`AITER_AR_MAX_SIZE_MB` 默认 64。`SGLANG_HCU_QWEN_SILU_INT8_FUSION`
+通过官方 typed env descriptor 读取，缺省关闭，匹配配方时默认启用。
+
+只有 prefill 角色默认 drain=wait；只有显式启用 prefill delayer 且
+`--prefill-delayer-queue-min-ratio 0` 时默认 mixed timeout。避免影响默认队列
+参数下的启动。已有内核的 dtype/shape/parallel/架构回退不变；尤其 split HC
+和 flat scatter 保留 gfx936 准入，不声称在 gfx938 上实际命中。
+
+所有项均使用 `setdefault`，显式环境变量（包括 `0`）优先；模块以 INFO 记录最终
+值及来源。该调用早于上游日志初始化时，默认启动日志可能不显示此记录；
+可检查 spawn worker 的继承环境及实际后端日志。可以用对应原值逐项回退，例如
+`SGLANG_QWEN4_ROUTED_INT8=0` 或 `SGLANG_QWEN4_PREFILL_QSA_IMPL=triton`。
+这只是验证过的模型配方，不修改所有模型的 SGLang 全局默认值。
+
+NUMA 两项和 AITER AG 在固定上游已默认开启，PLE inplace SiLU 已默认关闭，
+部署可以省略这些重复 export。`GPU_MAX_HW_QUEUES`、网络/RDMA、缓存路径、
+插件启用、`HCU_SLIMQUANT`、bootstrap timeout 与超长上下文许可保留在部署层；
+不能把本节点的驱动绕行和资源选择作为所有模型的默认值。
