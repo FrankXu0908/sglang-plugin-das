@@ -136,7 +136,7 @@ class HCUKVCacheConfigurator(NativeKVCacheConfigurator):
         result = super(HCUKVCacheConfigurator, self).configure(
             pre_model_load_memory=pre_model_load_memory
         )
-        if not self.is_draft_worker and enabled(w4a8_only=True):
+        if not self.is_draft_worker and enabled(pd_decode_only=True):
             self._hisparse_pd_capacity = result.token_to_kv_pool_allocator.size_full
         return result
 
@@ -151,7 +151,7 @@ class HCUKVCacheConfigurator(NativeKVCacheConfigurator):
         if isinstance(config.max_total_num_tokens, float):
             from hcu_sglang.layers.attention.hisparse import enabled
 
-            if enabled(w4a8_only=True):
+            if enabled():
                 config = replace(config, max_total_num_tokens=int(config.max_total_num_tokens))
         return super(HCUKVCacheConfigurator, self)._derive_pool_sizes(config=config)
 

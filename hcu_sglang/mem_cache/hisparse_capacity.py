@@ -8,7 +8,7 @@ import weakref
 def around_allocator_init(original, self, size, page_size, dtype, device, kvcache, need_sort, host_to_device_ratio=2):
     from hcu_sglang.layers.attention.hisparse import enabled
 
-    if not isinstance(host_to_device_ratio, float) or not enabled(w4a8_only=True):
+    if not isinstance(host_to_device_ratio, float) or not enabled():
         return original(self, size, page_size, dtype, device, kvcache, need_sort, host_to_device_ratio)
 
     import torch

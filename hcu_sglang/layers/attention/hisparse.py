@@ -73,7 +73,7 @@ def _matches_channel_w4a8(config):
     return has_w4_experts
 
 
-def enabled(view=None, *, w4a8_only=False):
+def enabled(view=None, *, pd_decode_only=False):
     if not is_hcu():
         return False
     from sglang.srt.arg_groups.model_override_base import model_config_of, resolved_view
@@ -90,10 +90,12 @@ def enabled(view=None, *, w4a8_only=False):
         view = resolved_view(server_args)
     if not view.enable_hisparse or view.kv_cache_dtype != "fp8_e4m3":
         return False
+    if pd_decode_only and view.disaggregation_mode != "decode":
+        return False
     config = model_config_of(view).hf_config
     if not model_matches(config):
         return False
-    if not w4a8_only and _matches_channel_fp8(config):
+    if _matches_channel_fp8(config):
         return True
     return (
         view.disaggregation_mode == "decode"

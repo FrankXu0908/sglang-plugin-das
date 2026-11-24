@@ -141,7 +141,7 @@ def __init__(
         )
     elif isinstance(index_buf_size, float):
         from hcu_sglang.layers.attention.hisparse import enabled
-        if enabled(w4a8_only=True):
+        if enabled():
             index_buf_size = int(index_buf_size) // self.page_size * self.page_size
     self.index_buf_size = index_buf_size
     # num head == 1 and head dim == 128 for index_k in DSA
