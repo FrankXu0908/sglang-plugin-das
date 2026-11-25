@@ -34,6 +34,7 @@
 - [2026-11-20：Qwen-Image 2.1 四卡 Ulysses 直收](#2026-11-20-qwen-image-21-四卡-ulysses-直收)
 - [2026-11-23：Qwen-Image 2.1 Ulysses 直收 PR 同步](#2026-11-23-qwen-image-21-ulysses-直收-pr-同步)
 - [2026-11-24：Qwen-Image 2.1 Ulysses 直收 release 更新](#2026-11-24-qwen-image-21-ulysses-直收-release-更新)
+- [2026-11-24：Diffusion FP8 W8A16 回退](#2026-11-24-diffusion-fp8-w8a16-回退)
 - [附录：布局、操作方式与汇总](#附录布局操作方式与汇总)
 
 两份早期独立开发记录已全文收录。历史结果不代表当前代码已重新验证。
@@ -4745,3 +4746,199 @@ PID不变，4P/4D与NUMA、并行、模型参数保持原配置。
 未测全量精度、两节点、其他模型GPU启动、CP>1或其他HCU架构性能；
 P Graph仍disabled。SGLang为镜像自带0.5.22 wheel，无可核验core Git SHA，
 服务文件清单另存，不能以Router SHA替代。
+
+## 2026-11-24：Diffusion FP8 W8A16 回退
+
+用途：将 LTX-2.5 Distilled 试验环境的外部 W8A16 替换收进正式 diffusion
+插件入口。仅新增 `Fp8LinearMethod.apply` 的 AROUND Hook，不修改 SGLang
+源码、量化配置、构造函数、`process_weights_after_loading` 或 Marlin 准备和执行。
+
+当前实现位于 `hcu_sglang/multimodal_gen/runtime/layers/quantization/fp8.py`，经 multimodal 聚合入口注册，
+同步 Hook 目标合同。支持 HIP gfx936、非 block、普通 E4M3FN 权重、单个 FP32
+scale 及 BF16 激活；按输入张量所在设备探测真实架构，不在 apply 中调用
+`is_hcu()`，不使用框架合成的 CUDA 语义判断硬件。Marlin、block FP8、gfx938
+等原生 FP8 设备、非 HIP、非 BF16 激活及未支持的权重布局均调用传入的
+有效原函数。未知设备保持上游行为，不吞执行错误、不承诺自动恢复原生报错。
+
+权重加载仍沿用上游在线 per-tensor 量化及转置，前向临时执行
+`(weight.float() * weight_scale).to(bfloat16)` 后调用 `F.linear`。
+不缓存整层或完整 DiT 的 BF16 权重，不宣称原生 FP8 GEMM 加速。
+本功能是 `hcu` diffusion 插件新增行为；adapter 的正常 bootstrap 仍保留，
+停用旧实验目录的 PYTHONPATH 和 LTX25_FP8_WEIGHT_ONLY，避免两次替换同一目标。
+
+初步验证：容器内 10 项 CPU 分发/数值测试通过，包括非 1 scale、非连续批量
+输入、空批次、不变的 FP8 参数、逐输入设备探测和原分支错误传播。
+L0 通过（623 Python、8 Skill）。真实 gfx936 上经正式 HookRegistry 注册后调用
+上游构造、加载后处理及公开 apply；单 scale 为 0.0027901786，含 bias 和非连续
+批量输入的结果与 BF16 反量化参考逐位一致，权重参数保持 FP8，无 BF16 持久副本。
+构造和加载后处理函数对象保持不变。
+
+容器 ltx23-sglang0522 / GPU2 / 30052 已去掉旧外部 hook 目录和环境开关，
+由正常 adapter bootstrap 与 hcu diffusion 插件组合启动，仅 FP8 DiT 常驻。
+960×544、121 帧、24 FPS、8 步、CFG1、seed42 的冷启动请求完成，服务生成
+耗时 44.77594 秒、API peak reserved 47296 MiB（46.1875 GiB）。日志确认
+W8A16 插件分发，MP4 含 48kHz stereo AAC 非静音音轨（mean_volume -11.9dB），
+容器内使用 imageio_ffmpeg 自带二进制完成视频和音频全长解码。解码数据的
+SHA256 与旧外部 hook 的冷/热输出均不同，未声明端到端逐位或质量等价。
+
+宿主全量 unittest 共 142 项：1 failure、2 errors、23 skipped；3 个失败项
+在干净 8b730e0 基线的定向重放中具有相同终端异常（field_names 测试替身缺项、
+另 2 项缺少 Torch）。这不是全量通过，容器内上述 10 项专项测试全部通过。
+Graph、compile、多卡及其他架构尚未验证。既有 5/10/20 秒与高分辨率容量数字
+仍属于原外部 hook 试验，不能作为本次插件服务复测结果。
+
+## 2026-11-25 LocalAttention mask 分发与目录对齐
+
+通过 `hcu` diffusion 插件的 AROUND Hook 接管
+`LocalAttention.forward`，实现放在
+[`runtime/layers/attention/local_attention.py`](../hcu_sglang/multimodal_gen/runtime/layers/attention/local_attention.py)。
+该模块仅包含 LocalAttention 分发及其 LTX 文本 mask 预处理配套 Hook；
+不修改 USPAttention 或其他 attention 类。
+整数/布尔全 1 和浮点加性全 0 的 mask 在语义允许时转成 `None`，
+继续使用当前有效的无 mask 后端；真实二值 mask 在 HIP HCU、inference、
+FP16/BF16、head dim 128、合法 BTHD/GQA 输入下调用已安装的
+`flash_attn_with_mask_func(bhsd=False)`。Q 对齐到 128、K/V 对齐到 64，
+先在紧凑 mask 上补齐再广播，输出裁回原 Q 长度并保证连续。
+不吞 kernel 错误。可选 API 缺失、不支持的 dtype/head dim、浮点 bias、
+非二值整数和全屏蔽行保留传入原函数；非 HCU/CPU 不改变返回布局。
+当前未接真实浮点硬 mask 的 FA 路线，避免将有限加性 bias 错当屏蔽位。
+
+`LTX2TextConnectorStage.forward` 的 AFTER Hook 在 connector 完成后，对正负
+文本 mask 各检查一次，将完全放行的 mask 设为 `None`，避免在 DiT 每层
+同步读取 GPU 标量。此检查发生在 DiT compile/Graph 之外。其他模型直接向
+LocalAttention 传入 mask 时，分类 helper 会引入 compile graph break；
+原始非空 mask 在 Graph capture 时保留 SDPA 回退，不宣称 masked FA
+已接入 Graph。无 mask 路径不做标量分类。
+
+使用 `torch.library.custom_op` 包装 masked FA，并提供 fake 输出，避免
+Dynamo 直接展开第三方 autograd/pybind 实现。原有 LTX 连续输出兼容 Hook
+保留，本次未修改社区源码或 adapter。当前无 mask 后端仍是 `torch_sdpa`。
+
+按框架结构同步将 FP8 W8A16 实现移至
+[`runtime/layers/quantization/fp8.py`](../hcu_sglang/multimodal_gen/runtime/layers/quantization/fp8.py)，
+只调整模块位置、聚合注册和测试引用，不改变权重加载、Marlin 或计算语义。
+两个新 Hook 同步目标合同，已有未提交改动保留。
+
+初步验证：容器中 15 项 LocalAttention/FP8 专项单测通过。GPU3/4 的真实
+LocalAttention 探针验证全有效 mask 命中 Flash SDPA，二值 mask 命中自定义
+FA op；覆盖 FP16/BF16、batch 2、GQA、逐 query mask、Q/K 非对齐、非连续 Q、
+causal 配置下带 mask 的原语义及回退。CFG 正负分支仅在两份 mask 都
+完全放行时同时移除，避免拼接时丢失另一分支的真实 mask。
+BF16 对拍固定 rtol=0.02、atol=0.00390625，最大绝对误差 0.0078125；
+160704 个 Q token 的长序列抽样最大绝对误差 0.0009765625，新增峰值
+2.4727 GiB。无 mask fullgraph Inductor default、带 mask 默认 compile
+（允许 graph break）以及无 mask 变输入 CUDA Graph replay 通过。
+整模型 eager 服务在独立 GPU3/30054 完成两条 960×544、121 帧、24 FPS、
+8 步、CFG1、seed42 请求。冷/热生成耗时 45.7177/20.0954 秒，DiT
+14.5572/14.1160 秒；API peak reserved 分别 45.1914/61.1660 GiB，
+后者不能解读为实际 allocated 峰值。两条 MP4 的视频/48kHz stereo 音频
+全长解码通过，mean_volume 为 -11.8/-11.6 dB。日志确认 connector mask
+在 DiT 前变成 None，FP8 W8A16 从移动后的模块执行。未做感知质量等价验收。
+整模型 FP8 default compile / CG 关闭的冷、热两条请求不再触发旧的
+attention view 异常，但输出均为 6416 字节、无音轨 MP4，2 秒位置 RGB
+抽帧所有像素为零。服务虽返回 completed，媒体验收失败，不计有效加速。
+冷/热 API 耗时 347.0529/15.6786 秒，DiT 308.9820/10.1641 秒，
+这些数字仅为失败现场记录。尚未定位编译后数值异常的具体算子，不能
+归因为 masked FA：本轮 LTX 实际已移除全有效 mask。未测整模型 CG、
+多卡及本轮高分辨率容量。独立测试服务结束后清理，原 GPU2 服务保留。
+
+最终 L0 通过（629 Python、8 Skill），导览构建及快照检查通过；
+未做浏览器渲染验收。宿主全量 unittest 共 147 项，1 failure、2 errors、
+28 skipped；失败仍为缺少 Torch 的两个导入错误及 CLI 测试替身缺
+field_names，不能记为全量通过。容器内 15 项专项测试全部通过。
+
+## 2026-11-25 gfx936 FP8 W8A16 Triton 反量化
+
+在现有 [Fp8LinearMethod.apply Hook](../hcu_sglang/multimodal_gen/runtime/layers/quantization/fp8.py)
+内使用 [Triton 反量化](../hcu_sglang/kernels/ops/quantization/fp8_dequant_triton.py)。
+适用范围为 gfx936、BF16 输入、非 Marlin 和非 block quant、E4M3FN 权重、
+一个 FP32 scale，以及转置后的连续 `[N,K]` 权重。保持原 `F.linear` 接口，
+在 GPU 上用一个 kernel 完成反量化。进 GEMM 前的 FP32 乘 scale 和最终 BF16
+舍入位置沿用旧路径。其他权重布局、需要对权重或 scale 求梯度的调用，
+以及原有框架分支继续使用各自有效路径。未修改权重加载、插件注册合同或 adapter。
+
+在 `ltx23-sglang0522` / BW1000 / DTK 26.10 的组合环境，11 项 FP8 专项
+unittest 通过。以 LTX-2.5 第一层的真实 Q、MLP up 和 MLP down 权重，
+用 1024、8160、63240 tokens 三维 BF16 合成激活进行九组全量对拍，输出逐位一致。
+反量化另检查 256 个 E4M3FN 编码及 13 个 FP32 scale，非 NaN 结果逐位一致，
+NaN 输出位置一致。GPU event 基准中，8160 tokens 的三个 Linear 分别降耗时
+19.2%、26.4%、21.1%。XSystem 记录同一个 rocBLAS GEMM kernel，反量化从
+三个 GPU kernel 降至一个。单卡 960×544／121 帧、8 步 eager A/B，每组排除一次预热，正式测四次。
+API 生成均值 19.669 → 16.803 秒，DiT 阶段 14.096 → 11.094 秒。
+全部样本通过音视频解码。compile、CG 和多卡本轮未测。完整数据见
+`perf_opt_docs` 仓内 `ltx_2_5_bw1000_sglang0522.md`。
+
+
+## 2026-11-25 forward 调用链移除日志
+
+按要求删除本轮多模态 runtime 中 forward / apply 调用链的日志：FP8 BF16 回退与 Triton 反量化分支，以及 LTX text connector mask 规范化。对应 logger、logging import 和一次性日志 helper 一并删除，不用编译条件包裹日志。设备判定的缓存保留，计算和分发逻辑未调整。
+
+本轮对修改前后 AST 做去日志归一化比较，三个文件的计算结构一致。此前容器最小 fullgraph 用例在冷/暖日志缓存两种情况下都因 logger.info 失败；日志被缓存不能代替编译兼容。编译回归只覆盖该最小用例，不作为完整模型 compile 或 GPU Graph 已通过的证据。已有服务不重启；后台视频的源码快照保留测试启动时的身份。
+
+
+## 2026-11-25 撤回 LTX MLP 容量优化
+
+按用户要求删除 LTX2FeedForward 分块和原地 GELU 的运行时实现、聚合注册、Hook 合同项与专项测试，MLP 恢复当前有效的社区路径。相关空包文件一并移除，优化实现和试验日志仅保留在私有任务归档中。保留此前 attention 和 FP8 W8A16 / Triton 反量化实现及无 forward 日志的约定。
+
+停止本轮 3K20 / 4K20 容量测试的自有 controller、服务及自动写文档 watcher，不继续为这两档做容量适配。既有 GPU2 / 30052 服务不重启。当前单卡部署结果中的 3072×1728 / 20 秒与 3840×2176 / 20 秒保留 OOM；其他已完成结果保留。Distilled 请求即使指定 1 步，也会被固定 sigma schedule 强制为 8 步，不能按请求值推断实际步数。
+
+## 2026-11-25 FP8 反量化算子目录对齐
+
+按 SGLang `kernels/README.md` 的计算职责分类，将 Triton FP8 反量化移至
+[`hcu_sglang/kernels/ops/quantization/fp8_dequant_triton.py`](../hcu_sglang/kernels/ops/quantization/fp8_dequant_triton.py)。
+[`Fp8LinearMethod.apply` Hook](../hcu_sglang/multimodal_gen/runtime/layers/quantization/fp8.py)
+继续负责设备与输入检查、回退及 `F.linear`，在符合条件时延迟导入算子。
+算子文件在迁移前后逐字节一致，调用方测试与性能记录已更新引用。
+
+在 BW1000 / gfx936 容器中，11 项 FP8 单测通过。直接调用 Hook 验证
+连续权重命中新路径，一处 stride=2 的非连续权重使用原回退，两路输出均与
+PyTorch 反量化参考逐位一致。包发现包含新目录。此次验证覆盖目录迁移后的导入、
+分派和数值，性能数据沿用此前 A/B。
+
+
+## 2026-11-25 LTX 插件提交前复核
+
+本次本地提交以插件 `8b730e0`、社区 SGLang `baa9befa38` 为基线，范围为
+FP8 W8A16、Triton 反量化、LocalAttention 与 LTX connector mask Hook，
+以及注册合同、专项测试和本文记录。不包含已有的 Qwen Ulysses 直收改动，
+不包含已撤回的 MLP 分块和原地 GELU。adapter 没有新增本轮提交；其工作区
+已有的 RoPE 修改在 11 月 23 日快照中已经存在，保持原未提交状态。
+
+使用仅包含本次候选文件的独立源码副本，在 `ltx23-sglang0522` / GPU5 /
+gfx936 上经正常 adapter bootstrap 和正式插件入口完成 16 项 FP8 / attention
+专项测试，全部通过。注册断言确认 FP8 与 LocalAttention Hook 生效、MLP
+Hook 缺席。另有 6 项 adapter RoPE GPU 回归通过，仅说明历史改动的定向测试
+结果，不把该改动归入本次插件提交。未重启原 GPU2 服务。
+
+候选源码 L0 通过（631 Python、8 Skill），导览构建和快照检查通过。
+宿主全量 unittest 共 148 项，1 failure、2 errors、29 skipped：CLI 测试
+替身缺少 `field_names`，两个导入测试缺少 Torch，与此前基线复现的失败一致。
+全量测试没有全部通过。浏览器渲染未验收，本轮未新增模型生成、compile 或
+Graph 性能验收；此前各项结果仍按各自记录的范围解释。
+
+
+## 2026-11-25 同步最新 release 与 Draft PR 验证
+
+将 LTX 提交移到插件 release `792f7d4`，adapter release 同步至 `692a210`。
+开发记录和 Hook 合同保留最新上游条目后补入本轮内容，导览重新生成；
+Qwen Ulysses 直收已由上游 #115 合入，不重复携带。adapter RoPE 与测试已在
+11 月 23 日的 #165（`6981a1e`）合入，本轮没有 adapter 新功能提交。
+adapter 原有的 FA varlen LSE 布局改动及测试单独保留为未提交工作。
+
+在现有 `ltx23-sglang0522` / GPU5 / gfx936 组合环境中，16 项专项测试通过，
+并断言 FP8、LocalAttention、connector 三个正式 Hook 已应用，MLP Hook 缺席。
+另从已注册入口执行 GPU 探针：FP8 apply 与旧反量化加 BF16 Linear 参考逐位
+一致；真实部分屏蔽、Q/K 均未对齐的 masked FA 与 Math SDPA 对拍通过
+rtol=0.02、atol=0.00390625，最大绝对误差 0.00390625，不声明 attention 逐位一致。
+
+启动测试时发现原 AITER 缓存中构建锁导致等待；本次命令单独将 AITER_JIT_DIR
+指向镜像自带已编译模块，未清理共享锁。补装测试 Python 环境缺失的 wcwidth
+0.9.5 后完成复测，未修改服务启动配置。原 GPU2 / 30052 健康检查为 200。
+社区源码 HEAD 为 `baa9befa38`，环境中已有其他未提交文件；本轮没有修改它们，
+组合测试不等同于干净社区工作树或全新镜像验收。
+
+L0 通过（750 Python、8 Skill）。宿主候选全量 236 项、13 errors、37 skipped；
+干净远端基线 220 项、13 errors、21 skipped。错误测试集合和缺 Torch 的终端
+异常逐项相同，没有新增工具测试错误，但两套全量测试均未全部通过。
+导览构建、快照检查及提交 diff 检查通过；未进行浏览器渲染验收，也未在
+同步后的版本新增整模型生成、compile/CG 或性能测量。
