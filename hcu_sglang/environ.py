@@ -64,6 +64,7 @@ _ENV_SPECS: dict[str, tuple[type, Any]] = {
     "SGLANG_QWEN4_FLAT_STATE_SCATTER": (EnvBool, False),
     "SGLANG_QWEN4_PREFILL_DIAGNOSTICS": (EnvBool, False),
     "SGLANG_QWEN4_PREFILL_QSA_IMPL": (EnvStr, "triton"),
+    "SGLANG_HCU_QSA_DECODE_IMPL": (EnvStr, "triton"),
     "SGLANG_HCU_QSA_PREFILL_LOGITS_MIB": (EnvInt, 0),
     "SGLANG_HCU_QSA_PREFILL_KEY_SPAN": (EnvInt, 0),
     "SGLANG_HCU_QSA_PREFILL_TP_ROWS": (EnvInt, 0),

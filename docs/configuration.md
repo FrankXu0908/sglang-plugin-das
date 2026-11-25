@@ -66,6 +66,7 @@ set +a
 | `SGLANG_QWEN4_FLAT_STATE_SCATTER` | bool / false | gfx936、36 层 FP32 48×128×128、1–16 条 metadata 的连续状态回写；保留 scratch 源行映射 |
 | `SGLANG_QWEN4_PREFILL_DIAGNOSTICS` | bool / false | 首次 compact 布局输出 rank/counts，和 routing 日志一起诊断实际路径 |
 | `SGLANG_QWEN4_PREFILL_QSA_IMPL` | str / `triton` | 实验性 QSA P 端 reader：`native-packed` 使用容器 FlashAttention 的 packed BF16 API；`native-paged` 在单位 scale、FP8 E5M2/E4M3、NHD 或 HCUMHA BHSD 分页缓存且各请求 prefix 不短于 top-k 槽位数时直接读分页缓存（该 paged provider 仅支持 GQA group12），其余受支持输入用 packed API。BF16 Q、head_dim=256、GQA group 1–16、CP=1；其他形状保留 Triton 路径。冷 prefill 保留 BF16 当前 K/V，不改 D 或 MTP。需包含这些专项 API 的 HCU FlashAttention；首次命中记录 provider/shape，缺依赖或内核错误直接传播。当前验证目标为 disabled prefill Graph，不能据此宣称 Graph 可用。`triton` 保留原有效路径；环境字段在 metadata 阶段读取，修改需重启 worker。 |
+| `SGLANG_HCU_QSA_DECODE_IMPL` | str / `triton` | `native-paged` 在 gfx936、CP1、page64、BF16 Q、D256、GQA group12、官方连续 NHD 或 HCUMHA BHSD 缓存及 BF16/E5M2/E4M3FN KV 下直接调用 HCU FA sparse paged GQA，省去 compact 和 BF16 scratch；支持 decode / MTP 的 eager 与 Graph。按当前 row request 从真实 `req_to_token` 生成页表，不能使用 Graph 的占位 token table；按每行 sequence length 屏蔽未来索引，保留空选择的 NaN。FP8 使用原 `k_scale_float/v_scale_float`（None 为 1）的设备 FP32 scalar，scale 在 Graph 捕获前固定。其他布局/dtype/形状/CP 保留现有 compact + Triton 路径；CPU 交给传入的 original。缺少 FA API 或 provider 报错直接传播，不伪装回退成功。`triton` 可显式回退；匹配下文 Qwen4 W4A8 配方时缺省设为 `native-paged`，其他模型默认不变。需要与 Torch ABI 匹配的 FA 构建。 |
 | `SGLANG_QWEN4_PLE_PREFILL_INPLACE_SILU` | bool / `False` | 实验性 PLE 普通 EXTEND 临时激活复用：仅 HCU CUDA 张量、CP1、关闭 autograd 且非 decode fast path 时，对原 `_short_conv` 的独占 advanced-index 临时张量执行原生 inplace SiLU。卷积、状态和追踪写回保持社区方法；使用私有 functional facade，不改全局 Torch、社区文件或 D/MTP。首次启用验证固定目标方法的 AST 指纹，漂移直接拒绝并要求重新审查别名所有权；关闭或不满足条件保留传入的有效基线。验证边界见开发记录。 |
 | `SGLANG_PLE_ETP_REDUCE_SCATTER` | bool / true | 支持的 PLE 分片布局采用 reduce-scatter；其他布局保留 all-reduce + scatter |
 | `SGLANG_PLE_ETP_REDUCE_SCATTER_MIN_TOKENS` | int / 2048 | 小于阈值时使用 all-reduce + scatter |
@@ -255,7 +256,8 @@ sort、DP gatherv、Python radix core 和 PD prefill DP rank 查询。
 所有项均使用 `setdefault`，显式环境变量（包括 `0`）优先；模块以 INFO 记录最终
 值及来源。该调用早于上游日志初始化时，默认启动日志可能不显示此记录；
 可检查 spawn worker 的继承环境及实际后端日志。可以用对应原值逐项回退，例如
-`SGLANG_QWEN4_ROUTED_INT8=0` 或 `SGLANG_QWEN4_PREFILL_QSA_IMPL=triton`。
+`SGLANG_QWEN4_ROUTED_INT8=0`、`SGLANG_QWEN4_PREFILL_QSA_IMPL=triton`
+或 `SGLANG_HCU_QSA_DECODE_IMPL=triton`。
 这只是验证过的模型配方，不修改所有模型的 SGLang 全局默认值。
 
 NUMA 两项和 AITER AG 在固定上游已默认开启，PLE inplace SiLU 已默认关闭，
