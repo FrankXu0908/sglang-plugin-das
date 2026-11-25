@@ -56,6 +56,7 @@ def apply_qwen36_serve_defaults() -> None:
 
 _ENV_SPECS: dict[str, tuple[type, Any]] = {
     "SGLANG_MOE_C_NATIVE_SORT": (EnvBool, False),
+    "SGLANG_HCU_QWEN_SILU_INT8_FUSION": (EnvBool, False),
     "SGLANG_QWEN4_COMPACT_PREFILL": (EnvBool, False),
     "SGLANG_QWEN4_LOCAL_ROUTING": (EnvBool, False),
     "SGLANG_QWEN4_ROUTED_INT8": (EnvBool, False),
