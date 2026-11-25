@@ -41,10 +41,17 @@ class Qwen4ServeDefaultsTests(unittest.TestCase):
         os.environ['W8A8_SUPPORT_METHODS'] = '1'
         applied = self.apply()
         self.assertEqual(os.environ['SGLANG_QWEN4_COMPACT_PREFILL'], '1')
+        self.assertEqual(os.environ['SGLANG_HCU_QSA_DECODE_IMPL'], 'native-paged')
         self.assertEqual(os.environ['SGLANG_QWEN4_ROUTED_INT8'], '0')
         self.assertEqual(os.environ['W8A8_SUPPORT_METHODS'], '1')
         self.assertNotIn('SGLANG_QWEN4_ROUTED_INT8', applied)
         self.assertEqual(self.apply(), {})
+
+    def test_decode_reader_override_preserves_baseline(self):
+        os.environ['SGLANG_HCU_QSA_DECODE_IMPL'] = 'triton'
+        applied = self.apply('--disaggregation-mode', 'decode')
+        self.assertNotIn('SGLANG_HCU_QSA_DECODE_IMPL', applied)
+        self.assertEqual(os.environ['SGLANG_HCU_QSA_DECODE_IMPL'], 'triton')
 
     def test_other_models_and_precision_remain_untouched(self):
         for model_type in ['qwen3_5', 'deepseek_v4', 'glm4_moe', 'qwen4_exp_future']:
