@@ -4,7 +4,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _dequant_e4m3fn_weight(Q, Scale, W, SIZE: tl.constexpr, BLOCK: tl.constexpr):
+def _dequant_e4m3fn_weight(Q, Scale, W, SIZE, BLOCK: tl.constexpr):
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     valid = offsets < SIZE
     raw = tl.load(Q + offsets, valid, other=0).to(tl.uint16)
